@@ -2,7 +2,6 @@ import telnetlib
 import re
 import requests
 import json
-import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
 class RouterInfoFetcher:
@@ -66,8 +65,6 @@ class RouterInfoFetcher:
         if router_id_match and local_as_match:
             bgp_info['Router ID'] = router_id_match.group(1)
             bgp_info['Local AS'] = local_as_match.group(1)
-        else:
-            print(f"Failed to parse BGP output: {output}")
         
         peers = []
         peer_matches = re.finditer(r"(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\d+)", output)
@@ -87,8 +84,6 @@ class RouterInfoFetcher:
         
         if router_id_match:
             ospf_info['Router ID'] = router_id_match.group(1)
-        else:
-            print(f"Failed to parse OSPF output: {output}")
         
         neighbors = []
         neighbor_matches = re.finditer(r"Router ID:\s+([\d\.]+)\s+Address:\s+([\d\.]+)", output)
@@ -103,7 +98,6 @@ class RouterInfoFetcher:
         return ospf_info
 
     def parse_routing_table(self, routing_table_output):
-        
         routes = []
         lines = routing_table_output.split('\r\n')
         for line in lines:
@@ -121,43 +115,9 @@ class RouterInfoFetcher:
     def filter_protocol(self, routes, protocol):
         return [route for route in routes if protocol in route["Protocol"]]
 
-    def create_adjacency_matrix(self, ospf_data, bgp_data):
-        routers = set()
-        for data in ospf_data.values():
-            if 'Router ID' in data:
-                routers.add(data['Router ID'])
-                for neighbor in data['Neighbors']:
-                    routers.add(neighbor['Neighbor Router ID'])
-        
-        for data in bgp_data.values():
-            if 'Router ID' in data:
-                routers.add(data['Router ID'])
-                for peer in data['Peers']:
-                    routers.add(peer['Peer'])
-        
-        routers = sorted(routers)
-        router_index = {router: idx for idx, router in enumerate(routers)}
-
-        size = len(routers)
-        adj_matrix = np.zeros((size, size), dtype=int)
-
-        for data in ospf_data.values():
-            if 'Router ID' in data:
-                router_id = data['Router ID']
-                for neighbor in data['Neighbors']:
-                    neighbor_id = neighbor['Neighbor Router ID']
-                    i, j = router_index[router_id], router_index[neighbor_id]
-                    adj_matrix[i][j] = adj_matrix[j][i] = 1
-        
-        for data in bgp_data.values():
-            if 'Router ID' in data:
-                router_id = data['Router ID']
-                for peer in data['Peers']:
-                    peer_id = peer['Peer']
-                    i, j = router_index[router_id], router_index[peer_id]
-                    adj_matrix[i][j] = adj_matrix[j][i] = 1
-
-        return adj_matrix, routers
+    def save_to_file(self, data, filename):
+        with open(filename, "w") as file:
+            json.dump(data, file, indent=4)
 
     def run(self):
         ports = self.fetch_ports_from_eve_ng()
@@ -166,6 +126,7 @@ class RouterInfoFetcher:
         routing_table_results = {}
         ospf_results = {}
         bgp_results = {}
+        pc_results = []
 
         with ThreadPoolExecutor(max_workers=len(routers)) as executor:
             futures = {executor.submit(self.fetch_info_from_router, router["port"]): f"Router_{i+1}" for i, router in enumerate(routers)}
@@ -175,7 +136,7 @@ class RouterInfoFetcher:
                 result = future.result()
                 router_id = futures[future]
                 if result.get("Device Type") == "PC":
-                    continue
+                    pc_results.append(router_id)
                 else:
                     routing_table_results[router_id] = result["Routing Table"]
                     ospf_results[router_id] = result["OSPF Neighbors"]
@@ -186,22 +147,18 @@ class RouterInfoFetcher:
         parsed_bgp_data = {router: self.parse_bgp_output(output) for router, output in bgp_results.items()}
         parsed_ospf_data = {router: self.parse_ospf_output(output) for router, output in ospf_results.items()}
 
-        adj_matrix, routers = self.create_adjacency_matrix(parsed_ospf_data, parsed_bgp_data)
-        
-        print("Adjacency Matrix:")
-        print(adj_matrix)
-        print("Routers:")
-        print(routers)
-        
-        result = {
-            "routers": routers,
-            "adjacency_matrix": adj_matrix.tolist()
-        }
-        
-        with open("adjacency_matrix.json", "w") as f:
-            json.dump(result, f, indent=4)
-        
-        print("Adjacency matrix and router list saved to adjacency_matrix.json")
+        all_routes = []
+        for routing_table in routing_table_results.values():
+            all_routes.extend(self.parse_routing_table(routing_table))
+
+        ospf_routes = self.filter_protocol(all_routes, "OSPF")
+        bgp_routes = self.filter_protocol(all_routes, "BGP")
+
+        self.save_to_file(parsed_bgp_data, "parsed_bgp_data.json")
+        self.save_to_file(parsed_ospf_data, "parsed_ospf_data.json")
+        self.save_to_file(ospf_routes, "ospf_routes.json")
+        self.save_to_file(bgp_routes, "bgp_routes.json")
+        self.save_to_file(pc_results, "pc_results.json")
 
     class TelnetClient:
         def __init__(self, host, port):
