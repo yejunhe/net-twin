@@ -1,11 +1,12 @@
 import xml.etree.ElementTree as ET
 import os
 import json
+import random
 
 class NodeReader:
-    def __init__(self, input_file_name, output_file_name):
-        self.input_file_path = os.path.join('/opt/unetlab/labs', input_file_name)
-        self.output_file_path = os.path.join(os.getcwd(), output_file_name)
+    def __init__(self, input_file_path, required_version):
+        self.input_file_path = input_file_path
+        self.required_version = required_version
         self.tree = None
         self.root = None
         self.nodes = None
@@ -23,6 +24,12 @@ class NodeReader:
         self.tree = ET.parse(self.input_file_path)
         self.root = self.tree.getroot()
 
+        # Check if the version matches the required version
+        version = self.root.attrib.get("version")
+        if version != self.required_version:
+            print(f"File {self.input_file_path} version {version} does not match the required version {self.required_version}. Skipping...")
+            return False
+
         self.nodes = self.root.find('topology').find('nodes')
         self.networks = self.root.find('topology').find('networks')
         return True
@@ -31,9 +38,12 @@ class NodeReader:
         for node in self.nodes.findall('node'):
             node_id = node.attrib.get('id')
             node_name = node.attrib.get('name')
+            # Generate a random throughput value between 100 and 1000 Mbps
+            throughput = random.randint(100, 1000)
             self.output_data["nodes"].append({
                 "node_id": node_id,
-                "node_name": node_name
+                "node_name": node_name,
+                "throughput_mbps": throughput  # Add throughput to node data
             })
 
     def collect_links(self):
@@ -71,17 +81,31 @@ class NodeReader:
                     }
                 })
 
-    def write_output(self):
+    def write_output(self, output_file_path):
         self.collect_nodes()
         self.collect_links()
-        with open(self.output_file_path, 'w') as file:
+        with open(output_file_path, 'w') as file:
             json.dump(self.output_data, file, indent=4)
-        print(f"Output written to {self.output_file_path}")
+        print(f"Output written to {output_file_path}")
 
-def parse_unl_file():
-    reader = NodeReader('8.unl', 'node_link.json') #第一个为实验文件名，第二个为输出结果文件名
-    if reader.parse_file():
-        reader.write_output()
+def process_unl_files(directory, output_file_name, required_version):
+    # List all .unl files in the specified directory
+    for file_name in os.listdir(directory):
+        if file_name.endswith('.unl'):
+            input_file_path = os.path.join(directory, file_name)
+            print(f"Processing file: {file_name}")
+            reader = NodeReader(input_file_path, required_version)
+            if reader.parse_file():
+                reader.write_output(output_file_name)
+
+def main():
+    # User can modify these parameters
+    directory = '/opt/unetlab/labs'       # Directory containing .unl files
+    output_file_name = 'node_link.json'   # Output file name
+    required_version = '2'                # Required version of the .unl files
+
+    # Call the function to process the files
+    process_unl_files(directory, output_file_name, required_version)
 
 if __name__ == "__main__":
-    parse_unl_file()
+    main()

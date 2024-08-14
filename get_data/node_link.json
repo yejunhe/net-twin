@@ -1,0 +1,234 @@
+{
+    "nodes": [
+        {
+            "node_id": "1",
+            "node_name": "R1",
+            "throughput_mbps": 928
+        },
+        {
+            "node_id": "2",
+            "node_name": "R2",
+            "throughput_mbps": 440
+        },
+        {
+            "node_id": "3",
+            "node_name": "R3",
+            "throughput_mbps": 442
+        },
+        {
+            "node_id": "4",
+            "node_name": "R4",
+            "throughput_mbps": 891
+        },
+        {
+            "node_id": "5",
+            "node_name": "R5",
+            "throughput_mbps": 580
+        },
+        {
+            "node_id": "6",
+            "node_name": "R6",
+            "throughput_mbps": 692
+        },
+        {
+            "node_id": "7",
+            "node_name": "R7",
+            "throughput_mbps": 553
+        }
+    ],
+    "links": [
+        {
+            "source": {
+                "node_name": "R5",
+                "interface_name": "eth0"
+            },
+            "target": {
+                "node_name": "R6",
+                "interface_name": "eth0"
+            }
+        },
+        {
+            "source": {
+                "node_name": "R4",
+                "interface_name": "eth0"
+            },
+            "target": {
+                "node_name": "R5",
+                "interface_name": "eth1"
+            }
+        },
+        {
+            "source": {
+                "node_name": "R2",
+                "interface_name": "eth0"
+            },
+            "target": {
+                "node_name": "R4",
+                "interface_name": "eth1"
+            }
+        },
+        {
+            "source": {
+                "node_name": "R1",
+                "interface_name": "eth0"
+            },
+            "target": {
+                "node_name": "R2",
+                "interface_name": "eth1"
+            }
+        },
+        {
+            "source": {
+                "node_name": "R3",
+                "interface_name": "eth1"
+            },
+            "target": {
+                "node_name": "R5",
+                "interface_name": "eth2"
+            }
+        },
+        {
+            "source": {
+                "node_name": "R1",
+                "interface_name": "eth1"
+            },
+            "target": {
+                "node_name": "R3",
+                "interface_name": "eth2"
+            }
+        },
+        {
+            "source": {
+                "node_name": "R4",
+                "interface_name": "eth2"
+            },
+            "target": {
+                "node_name": "R7",
+                "interface_name": "eth0"
+            }
+        }
+    ],
+    "containers": [
+        {
+            "container_id": "3d82fd73b017",
+            "cpu_percentage": "0.02%",
+            "memory_usage": "132.7MiB / 31.32GiB",
+            "network_io": "5.53kB / 1.54kB",
+            "block_io": "0B / 0B",
+            "pids": "69",
+            "router_name": "r4",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname r4\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface veth1_4_0\n ip address 192.168.34.4/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname r4\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "4271d3aa04e4",
+            "cpu_percentage": "0.81%",
+            "memory_usage": "123.2MiB / 31.32GiB",
+            "network_io": "5.12kB / 1.69kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "r3",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname r3\nlog syslog informational\nservice integrated-vtysh-config\n!\nip route 192.168.34.0/24 192.168.34.3\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface veth1_3_0\n ip address 192.168.34.3/24\nexit\n!\ninterface veth1_3_1\n ip address 192.168.23.3/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname r3\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "f607cc8a9183",
+            "cpu_percentage": "0.00%",
+            "memory_usage": "124.3MiB / 31.32GiB",
+            "network_io": "5.53kB / 1.54kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "r2",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname r2\nlog syslog informational\nservice integrated-vtysh-config\n!\nip route 192.168.34.0/24 192.168.23.3\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface veth1_2_0\n ip address 192.168.12.2/24\nexit\n!\ninterface veth1_2_1\n ip address 192.168.23.2/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname r2\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "d4d33386fdf4",
+            "cpu_percentage": "0.68%",
+            "memory_usage": "123.5MiB / 31.32GiB",
+            "network_io": "5.75kB / 1.45kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "r1",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname r1\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface veth1_1_0\n ip address 192.168.12.1/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname r1\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "9c3779cc0b96",
+            "cpu_percentage": "0.00%",
+            "memory_usage": "122.4MiB / 31.32GiB",
+            "network_io": "10.6kB / 1.17kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "R7",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname R7\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface lo\n ip address 7.7.7.7/32\nexit\n!\ninterface veth1_7_0\n ip address 192.168.7.7/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname R7\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "8886cb3b2a03",
+            "cpu_percentage": "0.19%",
+            "memory_usage": "122.2MiB / 31.32GiB",
+            "network_io": "15.3kB / 1.49kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "R5",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname R5\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface lo\n ip address 5.5.5.5/32\nexit\n!\ninterface veth1_5_0\n ip address 192.168.1.5/24\nexit\n!\ninterface veth1_5_1\n ip address 192.168.2.5/24\nexit\n!\ninterface veth1_5_2\n ip address 192.168.5.5/24\nexit\n!\nrouter bgp 65001\n bgp router-id 1.1.1.1\n bgp log-neighbor-changes\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname R5\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "3262c753609c",
+            "cpu_percentage": "0.37%",
+            "memory_usage": "122.1MiB / 31.32GiB",
+            "network_io": "15.6kB / 1.45kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "R3",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname R3\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface lo\n ip address 3.3.3.3/32\nexit\n!\ninterface veth1_3_1\n ip address 192.168.5.3/24\nexit\n!\ninterface veth1_3_2\n ip address 192.168.6.3/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname R3\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "8053d715c277",
+            "cpu_percentage": "0.56%",
+            "memory_usage": "121.7MiB / 31.32GiB",
+            "network_io": "15.4kB / 1.54kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "R4",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname R4\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface lo\n ip address 4.4.4.4/32\nexit\n!\ninterface veth1_4_0\n ip address 192.168.2.4/24\nexit\n!\ninterface veth1_4_1\n ip address 192.168.3.4/24\nexit\n!\ninterface veth1_4_2\n ip address 192.168.7.4/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname R4\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "77b2a42ce809",
+            "cpu_percentage": "0.11%",
+            "memory_usage": "120.7MiB / 31.32GiB",
+            "network_io": "15.8kB / 1.69kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "R1",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname R1\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface lo\n ip address 1.1.1.1/32\nexit\n!\ninterface veth1_1_0\n ip address 192.168.4.1/24\nexit\n!\ninterface veth1_1_1\n ip address 192.168.6.1/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname R1\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "0143d2d423b5",
+            "cpu_percentage": "0.99%",
+            "memory_usage": "123.3MiB / 31.32GiB",
+            "network_io": "15.6kB / 1.6kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "R2",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname R2\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface lo\n ip address 2.2.2.2/32\nexit\n!\ninterface veth1_2_0\n ip address 192.168.3.2/24\nexit\n!\ninterface veth1_2_1\n ip address 192.168.4.2/24\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname R2\nlog syslog informational\nservice integrated-vtysh-config..."
+        },
+        {
+            "container_id": "f68c6a946ddc",
+            "cpu_percentage": "0.44%",
+            "memory_usage": "120.5MiB / 31.32GiB",
+            "network_io": "10.7kB / 1.17kB",
+            "block_io": "0B / 0B",
+            "pids": "68",
+            "router_name": "R6",
+            "frr_conf": "frr version 10.1-dev\nfrr defaults traditional\nhostname R6\nlog syslog informational\nservice integrated-vtysh-config\n!\nvrf mgmt_vrf\nexit-vrf\n!\ninterface lo\n ip address 6.6.6.6/32\nexit\n!\ninterface veth1_6_0\n ip address 192.168.1.6/24\nexit\n!\nrouter ospf\n ospf router-id 6.6.6.6\n network 192.168.1.0/24 area 1\nexit\n!",
+            "frr_conf_preview": "frr version 10.1-dev\nfrr defaults traditional\nhostname R6\nlog syslog informational\nservice integrated-vtysh-config..."
+        }
+    ]
+}

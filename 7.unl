@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<lab name="7" id="424564b3-62f4-4bd4-b86b-e97856bc24d8" version="1111" scripttimeout="300" lock="0">
+  <topology>
+    <nodes>
+      <node id="1" name="r1" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1084" top="344" longitude="108.45951061167" latitude="34.484025866613">
+        <interface id="0" name="eth0" type="ethernet" network_id="1"/>
+      </node>
+      <node id="2" name="r2" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1068" top="294" longitude="106.8909065" latitude="29.4242115625">
+        <interface id="0" name="eth0" type="ethernet" network_id="1"/>
+        <interface id="1" name="eth1" type="ethernet" network_id="2"/>
+      </node>
+      <node id="3" name="r3" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1129" top="282" longitude="112.9993049375" latitude="28.21571546875">
+        <interface id="0" name="eth0" type="ethernet" network_id="2"/>
+        <interface id="1" name="eth1" type="ethernet" network_id="3"/>
+      </node>
+      <node id="4" name="r4" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1143" top="306" longitude="114.33963696875" latitude="30.6546803125">
+        <interface id="0" name="eth0" type="ethernet" network_id="3"/>
+      </node>
+      <node id="5" name="NE40" type="qemu" template="huaweine40" image="huaweine40-latest" console="telnet" cpu="2" cpulimit="1" ram="2048" ethernet="12" uuid="c6a1d05f-e1ca-4b0f-943e-3eeeaa758e0b" qemu_options="-machine type=pc,accel=kvm -serial mon:stdio -nographic -usbdevice tablet -boot order=cd" qemu_version="6.0.0" qemu_arch="x86_64" qemu_nic="vmxnet3" delay="0" icon="huaweine40e.png" config="0" left="1112" top="352" longitude="111.2427128426" latitude="35.216447294579"/>
+    </nodes>
+    <networks>
+      <network id="1" type="ovs" name="Net-Net-r1iface_r2" left="299" top="379" visibility="0" vxlans=""/>
+      <network id="2" type="ovs" name="Net-Net-r2iface_r3" left="341" top="302" visibility="0" vxlans=""/>
+      <network id="3" type="ovs" name="Net-Net-r3iface_r4" left="255" top="209" visibility="0" vxlans=""/>
+    </networks>
+  </topology>
+</lab>

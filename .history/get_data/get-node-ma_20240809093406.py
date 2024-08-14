@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 import os
 import json
+import numpy as np
 
 class NodeReader:
     def __init__(self, input_file_name, output_file_name):
@@ -12,7 +13,8 @@ class NodeReader:
         self.networks = None
         self.output_data = {
             "nodes": [],
-            "links": []
+            "links": [],
+            "adjacency_matrix": {}
         }
 
     def parse_file(self):
@@ -71,15 +73,36 @@ class NodeReader:
                     }
                 })
 
+    def generate_adjacency_matrix(self):
+        node_names = [node["node_name"] for node in self.output_data["nodes"]]
+        size = len(node_names)
+        adjacency_matrix = np.zeros((size, size), dtype=int)
+
+        name_to_index = {name: index for index, name in enumerate(node_names)}
+
+        for link in self.output_data["links"]:
+            source_index = name_to_index[link["source"]["node_name"]]
+            target_index = name_to_index[link["target"]["node_name"]]
+            adjacency_matrix[source_index][target_index] = 1
+            adjacency_matrix[target_index][source_index] = 1  # Undirected graph
+
+        # Convert adjacency matrix to a list of lists for JSON serialization
+        adjacency_matrix_list = adjacency_matrix.tolist()
+        
+        self.output_data["adjacency_matrix"]["node_names"] = node_names
+        self.output_data["adjacency_matrix"]["matrix"] = adjacency_matrix_list
+
     def write_output(self):
         self.collect_nodes()
         self.collect_links()
+        self.generate_adjacency_matrix()
+
         with open(self.output_file_path, 'w') as file:
             json.dump(self.output_data, file, indent=4)
         print(f"Output written to {self.output_file_path}")
 
 def parse_unl_file():
-    reader = NodeReader('8.unl', 'node_link.json') #第一个为实验文件名，第二个为输出结果文件名
+    reader = NodeReader('8.unl', 'node_link.json')
     if reader.parse_file():
         reader.write_output()
 

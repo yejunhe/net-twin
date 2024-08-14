@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<lab name="8" id="8356ab33-e043-47c5-acc5-fd79b006c7e3" version="1" scripttimeout="300" lock="0">
+  <topology>
+    <nodes>
+      <node id="2" name="FYX" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1172" top="319" longitude="117.26905" latitude="31.9615">
+        <interface id="0" name="eth0" type="ethernet" network_id="1"/>
+        <interface id="1" name="eth1" type="ethernet" network_id="2"/>
+      </node>
+      <node id="1" name="XJF" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1165" top="318" longitude="116.59116" latitude="31.86829">
+        <interface id="0" name="eth0" type="ethernet" network_id="1"/>
+        <interface id="1" name="eth1" type="ethernet" network_id="4"/>
+        <interface id="2" name="eth2" type="ethernet" network_id="6"/>
+      </node>
+      <node id="3" name="ZJR" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1168" top="336" longitude="116.84818099656" latitude="33.614885539637">
+        <interface id="0" name="eth0" type="ethernet" network_id="3"/>
+        <interface id="1" name="eth1" type="ethernet" network_id="5"/>
+        <interface id="2" name="eth2" type="ethernet" network_id="6"/>
+      </node>
+      <node id="4" name="XSW" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1181" top="322" longitude="118.1027" latitude="32.24149">
+        <interface id="0" name="eth0" type="ethernet" network_id="2"/>
+        <interface id="1" name="eth1" type="ethernet" network_id="3"/>
+      </node>
+      <node id="5" name="R1" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1159" top="326" longitude="115.93330407618" latitude="32.678335960435">
+        <interface id="0" name="eth0" type="ethernet" network_id="4"/>
+      </node>
+      <node id="6" name="R2" type="docker" template="docker" image="25125/frrouting:10-dev-05221913" ethernet="10" ram="1024" console="ssh" delay="0" icon="frr.png" config="0" left="1161" top="333" longitude="116.12392860685" latitude="33.386369263706">
+        <interface id="0" name="eth0" type="ethernet" network_id="5"/>
+      </node>
+    </nodes>
+    <networks>
+      <network id="1" type="ovs" name="Net-Net-FYXiface_XJF" left="436" top="233" visibility="0" vxlans=""/>
+      <network id="2" type="ovs" name="Net-Net-FYXiface_XSW" left="275" top="376" visibility="0" vxlans=""/>
+      <network id="3" type="ovs" name="Net-Net-ZJRiface_XSW" left="387" top="278" visibility="0" vxlans=""/>
+      <network id="4" type="ovs" name="Net-Net-XJFiface_R1" left="418" top="233" visibility="0" vxlans=""/>
+      <network id="5" type="ovs" name="Net-Net-ZJRiface_R2" left="487" top="264" visibility="0" vxlans=""/>
+      <network id="6" type="ovs" name="Net-Net-XJFiface_ZJR" left="490" top="350" visibility="0" vxlans=""/>
+    </networks>
+  </topology>
+</lab>

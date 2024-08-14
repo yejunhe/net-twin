@@ -1,27 +1,35 @@
 import xml.etree.ElementTree as ET
 import os
 import json
+import numpy as np
 
 class NodeReader:
-    def __init__(self, input_file_name, output_file_name):
-        self.input_file_path = os.path.join('/opt/unetlab/labs', input_file_name)
+    def __init__(self, input_directory, output_file_name, required_version):
+        self.input_directory = input_directory
         self.output_file_path = os.path.join(os.getcwd(), output_file_name)
+        self.required_version = required_version
         self.tree = None
         self.root = None
         self.nodes = None
         self.networks = None
         self.output_data = {
             "nodes": [],
-            "links": []
+            "links": [],
+            "adjacency_matrix": {}
         }
 
-    def parse_file(self):
-        if not os.path.exists(self.input_file_path):
-            print(f"File {self.input_file_path} does not exist.")
+    def parse_file(self, file_path):
+        if not os.path.exists(file_path):
+            print(f"File {file_path} does not exist.")
             return False
         
-        self.tree = ET.parse(self.input_file_path)
+        self.tree = ET.parse(file_path)
         self.root = self.tree.getroot()
+
+        version = self.root.attrib.get("version", "")
+        if version != self.required_version:
+            print(f"File {file_path} version {version} does not match the required version {self.required_version}. Skipping.")
+            return False
 
         self.nodes = self.root.find('topology').find('nodes')
         self.networks = self.root.find('topology').find('networks')
@@ -71,17 +79,44 @@ class NodeReader:
                     }
                 })
 
+    def generate_adjacency_matrix(self):
+        node_names = [node["node_name"] for node in self.output_data["nodes"]]
+        size = len(node_names)
+        adjacency_matrix = np.zeros((size, size), dtype=int)
+
+        name_to_index = {name: index for index, name in enumerate(node_names)}
+
+        for link in self.output_data["links"]:
+            source_index = name_to_index[link["source"]["node_name"]]
+            target_index = name_to_index[link["target"]["node_name"]]
+            adjacency_matrix[source_index][target_index] = 1
+            adjacency_matrix[target_index][source_index] = 1  # Undirected graph
+
+        # Convert adjacency matrix to a list of lists for JSON serialization
+        adjacency_matrix_list = adjacency_matrix.tolist()
+        
+        self.output_data["adjacency_matrix"]["node_names"] = node_names
+        self.output_data["adjacency_matrix"]["matrix"] = adjacency_matrix_list
+
     def write_output(self):
-        self.collect_nodes()
-        self.collect_links()
         with open(self.output_file_path, 'w') as file:
             json.dump(self.output_data, file, indent=4)
         print(f"Output written to {self.output_file_path}")
 
-def parse_unl_file():
-    reader = NodeReader('8.unl', 'node_link.json') #第一个为实验文件名，第二个为输出结果文件名
-    if reader.parse_file():
-        reader.write_output()
+    def process_directory(self):
+        for file_name in os.listdir(self.input_directory):
+            if file_name.endswith('.unl'):
+                file_path = os.path.join(self.input_directory, file_name)
+                if self.parse_file(file_path):
+                    self.collect_nodes()
+                    self.collect_links()
+                    self.generate_adjacency_matrix()
+
+        self.write_output()
+
+def parse_unl_files():
+    reader = NodeReader('/opt/unetlab/labs', 'node_link.json', required_version="2")
+    reader.process_directory()
 
 if __name__ == "__main__":
-    parse_unl_file()
+    parse_unl_files()
