@@ -28,14 +28,20 @@ def get_unl_file_path(directory, lab_id):
     unl_file_path = os.path.join(directory, unl_file_name)
     return unl_file_path
 
-def get_lab_id_from_unl(unl_file):
+def get_unl_ids(unl_file):
     """
-    解析 .unl 文件，提取 <lab> 元素的 id。
+    解析 .unl 文件，提取所有节点的 id。
     """
     tree = ET.parse(unl_file)
     root = tree.getroot()
-    lab_id = root.get('id')
-    return lab_id
+    
+    ids = []
+    for node in root.findall(".//node"):
+        node_id = node.get('id')
+        if node_id:
+            ids.append(node_id)
+    
+    return ids
 
 def get_running_containers():
     """
@@ -51,14 +57,15 @@ def get_running_containers():
     
     return containers
 
-def match_ids_with_containers(lab_id, containers):
+def match_ids_with_containers(unl_ids, containers):
     """
-    将 .unl 文件中的 lab_id 与容器 NAMES 进行部分匹配，返回所有匹配到的容器 ID。
+    将 .unl 文件中的 id 与容器 NAMES 进行部分匹配，返回所有匹配到的容器 ID。
     """
     matched_containers = []
-    for container_name, container_id in containers.items():
-        if lab_id in container_name:
-            matched_containers.append(container_id)
+    for unl_id in unl_ids:
+        for container_name, container_id in containers.items():
+            if container_name.startswith(unl_id):
+                matched_containers.append(container_id)
     
     return matched_containers
 
@@ -94,14 +101,13 @@ if __name__ == "__main__":
         if not os.path.exists(unl_file_path):
             print(f".unl file {unl_file_path} not found.")
         else:
-            # 获取 unl 文件中的 lab id
-            lab_id_from_unl = get_lab_id_from_unl(unl_file_path)
+            unl_ids = get_unl_ids(unl_file_path)
             
-            if not lab_id_from_unl:
-                print("No lab id found in the .unl file.")
+            if not unl_ids:
+                print("No IDs found in the .unl file.")
             else:
                 running_containers = get_running_containers()
-                matched_container_ids = match_ids_with_containers(lab_id_from_unl, running_containers)
+                matched_container_ids = match_ids_with_containers(unl_ids, running_containers)
                 
                 if matched_container_ids:
                     with open(output_file_path, 'w') as output_file:

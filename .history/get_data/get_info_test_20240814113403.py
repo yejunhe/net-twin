@@ -11,31 +11,38 @@ def get_latest_directory(directory):
     latest_dir = max(dirs, key=os.path.getmtime)
     return latest_dir
 
-def get_lab_id_from_json(json_file):
+def get_unl_file_name_from_json(json_file):
     """
-    从 param.json 文件中解析出 labId 的值，这个值对应 .unl 文件的名称。
+    从 param.json 文件中解析出 .unl 文件的名称。
     """
     with open(json_file, 'r') as file:
         data = json.load(file)
-        lab_id = data.get('labId')
-    return lab_id
+        unl_file_name = data.get('unl_file_name')  # 根据实际的 JSON 结构调整这个键名
+    return unl_file_name
 
-def get_unl_file_path(directory, lab_id):
+def find_unl_file_in_directory(directory, unl_file_name):
     """
-    根据 labId 在指定目录下构建 .unl 文件的路径。
+    在指定目录下查找给定名称的 .unl 文件。
     """
-    unl_file_name = f"{lab_id}.unl"
-    unl_file_path = os.path.join(directory, unl_file_name)
-    return unl_file_path
+    for root, dirs, files in os.walk(directory):
+        if unl_file_name in files:
+            return os.path.join(root, unl_file_name)
+    return None
 
-def get_lab_id_from_unl(unl_file):
+def get_unl_ids(unl_file):
     """
-    解析 .unl 文件，提取 <lab> 元素的 id。
+    解析 .unl 文件，提取所有节点的 id。
     """
     tree = ET.parse(unl_file)
     root = tree.getroot()
-    lab_id = root.get('id')
-    return lab_id
+    
+    ids = []
+    for node in root.findall(".//node"):
+        node_id = node.get('id')
+        if node_id:
+            ids.append(node_id)
+    
+    return ids
 
 def get_running_containers():
     """
@@ -51,14 +58,15 @@ def get_running_containers():
     
     return containers
 
-def match_ids_with_containers(lab_id, containers):
+def match_ids_with_containers(unl_ids, containers):
     """
-    将 .unl 文件中的 lab_id 与容器 NAMES 进行部分匹配，返回所有匹配到的容器 ID。
+    将 .unl 文件中的 id 与容器 NAMES 进行部分匹配，返回所有匹配到的容器 ID。
     """
     matched_containers = []
-    for container_name, container_id in containers.items():
-        if lab_id in container_name:
-            matched_containers.append(container_id)
+    for unl_id in unl_ids:
+        for container_name, container_id in containers.items():
+            if container_name.startswith(unl_id):
+                matched_containers.append(container_id)
     
     return matched_containers
 
@@ -82,26 +90,25 @@ if __name__ == "__main__":
     latest_dir = get_latest_directory(reasoning_directory)
     json_file_path = os.path.join(latest_dir, 'params', 'param.json')
     
-    # 从 JSON 文件中提取 labId
-    lab_id = get_lab_id_from_json(json_file_path)
+    # 从 JSON 文件中提取 .unl 文件名称
+    unl_file_name = get_unl_file_name_from_json(json_file_path)
     
-    if not lab_id:
-        print("No labId found in the param.json file.")
+    if not unl_file_name:
+        print("No .unl file name found in the param.json file.")
     else:
-        # 根据 labId 构建 .unl 文件的路径
-        unl_file_path = get_unl_file_path(labs_directory, lab_id)
+        # 在 /opt/unetlab/labs 目录下查找 .unl 文件的完整路径
+        unl_file_path = find_unl_file_in_directory(labs_directory, unl_file_name)
         
-        if not os.path.exists(unl_file_path):
-            print(f".unl file {unl_file_path} not found.")
+        if not unl_file_path:
+            print(f".unl file named {unl_file_name} not found in the {labs_directory} directory.")
         else:
-            # 获取 unl 文件中的 lab id
-            lab_id_from_unl = get_lab_id_from_unl(unl_file_path)
+            unl_ids = get_unl_ids(unl_file_path)
             
-            if not lab_id_from_unl:
-                print("No lab id found in the .unl file.")
+            if not unl_ids:
+                print("No IDs found in the .unl file.")
             else:
                 running_containers = get_running_containers()
-                matched_container_ids = match_ids_with_containers(lab_id_from_unl, running_containers)
+                matched_container_ids = match_ids_with_containers(unl_ids, running_containers)
                 
                 if matched_container_ids:
                     with open(output_file_path, 'w') as output_file:
