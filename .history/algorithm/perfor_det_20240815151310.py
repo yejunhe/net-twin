@@ -169,15 +169,14 @@ class NodeReader:
                 "hostname": "",
                 "frr_conf": f"Failed to get configuration from container {container_id}. Error: {e}\n"
             }
-    def write_output(self, txt_output_file, reasoning_directory):
-    # 收集节点和链接信息
+    def write_output(self, json_output_file, reasoning_directory):
         self.collect_nodes()
         self.collect_links()
 
-        # 获取运行中的容器
+    # 获取运行中的容器
         running_containers = self.get_running_containers()
 
-        # 匹配容器ID
+    # 匹配容器ID
         matched_container_ids = self.match_ids_with_containers(self.root.get('id'), running_containers)
 
         performance_summary = []
@@ -200,11 +199,11 @@ class NodeReader:
                     "docker_stats": docker_stats
                 })
 
-                # 提取并解析 CPU 和内存使用率
+            # 提取并解析 CPU 和内存使用率
                 cpu_usage = float(docker_stats["cpu_percent"].strip('%'))
                 memory_usage = parse_memory_usage(docker_stats["memory_usage"])
 
-                # 动态生成性能评估
+            # 动态生成性能评估
                 if cpu_usage > evaluation_criteria["cpu_threshold"]:
                     performance_summary.append(f"路由 {container_info['hostname']} 的 CPU 使用率过高: {cpu_usage}%")
                 else:
@@ -215,7 +214,7 @@ class NodeReader:
                 else:
                     performance_summary.append(f"路由 {container_info['hostname']} 的内存使用率正常: {memory_usage} MiB")
 
-                # 假设我们可以通过某种方式获得网络延迟数据（这部分数据不在 docker stats 输出中，需要额外的监控工具）
+            # 假设我们可以通过某种方式获得网络延迟数据（这部分数据不在 docker stats 输出中，需要额外的监控工具）
                 network_latency = random.randint(50, 150)  # 这里我们随机生成一个模拟延迟
                 if network_latency > evaluation_criteria["network_latency_threshold"]:
                     performance_summary.append(f"路由 {container_info['hostname']} 的网络延迟过高: {network_latency}ms")
@@ -229,60 +228,56 @@ class NodeReader:
         else:
             print("No matching containers found.")
 
-        # 将性能评估写入指定的 TXT 文件
-        with open(txt_output_file, 'w') as txt_file:
+    # 将输出数据写入 JSON 文件
+        with open(json_output_file, 'w') as json_file:
+            json.dump(self.output_data, json_file, indent=4)
+        print(f"Configuration output written to {json_output_file}")
+
+    # 获取最新文件夹并创建 /res 目录下的 data.txt 文件路径
+        latest_dir = get_latest_directory(reasoning_directory)
+        res_directory = os.path.join(latest_dir, 'res')
+        if not os.path.exists(res_directory):
+            os.makedirs(res_directory)
+        data_txt_path = os.path.join(res_directory, 'data.txt')
+
+    # 将性能评估写入 data.txt 文件
+        with open(data_txt_path, 'w') as txt_file:
             txt_file.write(f"性能评估结果: {self.output_data['performance_evaluation']}\n\n")
             txt_file.write(f"评估标准及具体数值:\n")
             txt_file.write(f"CPU 使用率阈值: {evaluation_criteria['cpu_threshold']}%\n")
             txt_file.write(f"内存使用率阈值: {evaluation_criteria['memory_threshold']} MiB\n")
             txt_file.write(f"网络延迟阈值: {evaluation_criteria['network_latency_threshold']}ms\n")
-        print(f"Performance evaluation written to {txt_output_file}")
+        print(f"Performance evaluation written to {data_txt_path}")
+
+
 
 def main():
     # 设置默认路径
     default_reasoning_directory = "/uploadPath/reasoning"  # 最新文件夹所在的路径
     default_labs_directory = "/opt/unetlab/labs"  # .unl 文件所在的根目录
-    default_txt_output_file = 'data.txt'  # 默认输出文件名
+    default_json_output_file = 'config_data.json'
 
     # 创建参数解析器
     parser = argparse.ArgumentParser(description="Process UNL files and collect performance data.")
-    parser.add_argument("-i", "--input", help="Directory containing the reasoning folder or path to the JSON file", default=None)
-    parser.add_argument("-o", "--output", help="TXT output file", default=None)
+    parser.add_argument("-i", "--input", help="Directory containing the reasoning folder or path to the JSON file", default=default_reasoning_directory)
+    parser.add_argument("-o", "--output", help="JSON output file", default=default_json_output_file)
     
     args = parser.parse_args()
 
     # 根据是否提供参数来选择路径
-    input_path = args.input
-    txt_output_file = args.output
+    input_path = args.input if args.input else default_reasoning_directory
+    json_output_file = args.output if args.output else default_json_output_file
 
-    if not input_path and not txt_output_file:
-        # 如果没有提供输入和输出路径，使用默认路径
-        latest_dir = get_latest_directory(default_reasoning_directory)
-        res_directory = os.path.join(latest_dir, 'res')
-        if not os.path.exists(res_directory):
-            os.makedirs(res_directory)
-        txt_output_file = os.path.join(res_directory, default_txt_output_file)
+    if os.path.isdir(input_path):
+        # 如果是目录，则继续获取最新文件夹
+        latest_dir = get_latest_directory(input_path)
         json_file_path = os.path.join(latest_dir, 'params', 'param.json')
+    elif os.path.isfile(input_path):
+        # 如果是文件，直接使用该文件路径
+        json_file_path = input_path
     else:
-        # 如果提供了输入路径
-        if os.path.isdir(input_path):
-            # 如果是目录，则继续获取最新文件夹
-            latest_dir = get_latest_directory(input_path)
-            json_file_path = os.path.join(latest_dir, 'params', 'param.json')
-        elif os.path.isfile(input_path):
-            # 如果是文件，直接使用该文件路径
-            json_file_path = input_path
-        else:
-            print(f"Invalid input path: {input_path}")
-            return
-
-        # 如果没有提供输出路径，使用默认路径
-        if not txt_output_file:
-            latest_dir = get_latest_directory(default_reasoning_directory)
-            res_directory = os.path.join(latest_dir, 'res')
-            if not os.path.exists(res_directory):
-                os.makedirs(res_directory)
-            txt_output_file = os.path.join(res_directory, default_txt_output_file)
+        print(f"Invalid input path: {input_path}")
+        return
 
     # 从 JSON 文件中提取 labId
     lab_id = get_lab_id_from_json(json_file_path)
@@ -300,8 +295,7 @@ def main():
             reader = NodeReader(unl_file_path)
             if reader.parse_file():
                 # 调用 write_output 时传递 reasoning_directory
-                reader.write_output(txt_output_file, input_path)
-
+                reader.write_output(json_output_file, input_path)
 
 
 def get_lab_id_from_json(json_file):
