@@ -72,7 +72,7 @@ class FrrContainerManager:
 
         return data
 
-    def save_missing_info_to_txt(self, data, output_file):
+    def save_missing_info_to_txt(self, data, processor: 'ExperimentProcessor'):
         translations = {
             'bgp': 'BGP配置',
             'ospf': 'OSPF配置',
@@ -80,6 +80,8 @@ class FrrContainerManager:
             'ospf router-id': 'OSPF路由器ID',
             'network': '网络'
         }
+
+        input_file, output_file = processor.process_paths()
 
         try:
             with open(output_file, 'w', encoding='utf-8') as txt_file:
@@ -135,7 +137,7 @@ class FrrContainerManager:
                     print(f"Could not retrieve frr.conf from container {cid}.")
 
             if self.frr_conf_data:
-                self.save_missing_info_to_txt(self.frr_conf_data, processor.output_file)
+                self.save_missing_info_to_txt(self.frr_conf_data, processor)
             else:
                 print("No frr.conf data to save.")
         else:
@@ -143,22 +145,9 @@ class FrrContainerManager:
 
 
 class ExperimentProcessor:
-    def __init__(self, input_base_dir=None, output_base_dir=None):
-        self.input_base_dir = input_base_dir or '/uploadPath/reasoning'
-        self.output_base_dir = output_base_dir or '/uploadPath/reasoning'
-        self.input_path = None
-        self.output_file = None
-
-    def set_paths(self, input_path=None, output_path=None):
-        if input_path:
-            self.input_path = input_path
-        else:
-            self.input_path, _ = self.process_paths()
-
-        if output_path:
-            self.output_file = output_path
-        else:
-            _, self.output_file = self.process_paths()
+    def __init__(self, input_base_dir, output_base_dir):
+        self.input_base_dir = input_base_dir
+        self.output_base_dir = output_base_dir
 
     def find_latest_folder(self, base_dir):
         folders = [f for f in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, f)) and f.isdigit()]
@@ -168,9 +157,15 @@ class ExperimentProcessor:
         return os.path.join(base_dir, latest_folder), latest_folder
 
     def process_paths(self):
-        input_folder_path, folder_name = self.find_latest_folder(self.input_base_dir)
+        # Check if the input path is a file or directory
+        if os.path.isfile(self.input_base_dir):
+            input_file = self.input_base_dir
+            folder_name = os.path.basename(os.path.dirname(input_file))
+        else:
+            input_folder_path, folder_name = self.find_latest_folder(self.input_base_dir)
+            input_file = os.path.join(input_folder_path, 'params', 'param.json')
+        
         output_folder_path = os.path.join(self.output_base_dir, folder_name)
-        input_file = os.path.join(input_folder_path, 'params', 'param.json')
         output_folder = os.path.join(output_folder_path, 'res')
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
@@ -178,7 +173,13 @@ class ExperimentProcessor:
         return input_file, output_file
 
     def get_lab_id_from_param_json(self):
-        with open(self.input_path, 'r') as file:
+        if os.path.isfile(self.input_base_dir):
+            json_file_path = self.input_base_dir
+        else:
+            latest_dir, _ = self.find_latest_folder(self.input_base_dir)
+            json_file_path = os.path.join(latest_dir, 'params', 'param.json')
+        
+        with open(json_file_path, 'r') as file:
             data = json.load(file)
             lab_id = data.get('labId')
         return lab_id
@@ -196,15 +197,17 @@ class ExperimentProcessor:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process FRR containers and save missing configuration info.")
-    parser.add_argument('-i', '--input', type=str, help='Input file path (param.json)')
-    parser.add_argument('-o', '--output', type=str, help='Output file path (data.txt)')
+    parser.add_argument('-i', '--input', type=str, help='Input base directory path or input file path')
+    parser.add_argument('-o', '--output', type=str, help='Output base directory path')
     
     args = parser.parse_args()
     
-    processor = ExperimentProcessor()
-
-    # Set paths based on provided arguments or defaults
-    processor.set_paths(args.input, args.output)
+    default_input_path = '/uploadPath/reasoning'
+    default_output_path = '/uploadPath/reasoning'
     
+    input_path = args.input if args.input else default_input_path
+    output_path = args.output if args.output else default_output_path
+    
+    processor = ExperimentProcessor(input_path, output_path)
     manager = FrrContainerManager()
     manager.process_containers(processor)
