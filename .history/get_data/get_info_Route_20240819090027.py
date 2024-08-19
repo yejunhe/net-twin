@@ -90,27 +90,14 @@ class FRRConfigExtractor:
         except subprocess.CalledProcessError as e:
             return f"Failed to get configuration from container {container_id}. Error: {e}"
 
-    def get_container_stats(self):
+    def get_container_stats(self, container_id):
         try:
-            result = subprocess.run(['docker', 'stats', '--no-stream', '--format',
-                                     '"{{.ID}} {{.Name}} {{.CPUPerc}} {{.MemUsage}} {{.NetIO}} {{.BlockIO}} {{.PIDs}}"'],
+            result = subprocess.run(['docker', 'stats', container_id, '--no-stream', '--format',
+                                     '"{{.Name}}: CPU: {{.CPUPerc}}, Mem: {{.MemUsage}}"'],
                                     capture_output=True, text=True, check=True)
-            stats = {}
-            for line in result.stdout.strip().splitlines():
-                line = line.strip().strip('"')
-                parts = line.split(maxsplit=6)
-                container_id = parts[0]
-                stats[container_id] = {
-                    'Name': parts[1],
-                    'CPU': parts[2],
-                    'Memory': parts[3],
-                    'NetIO': parts[4],
-                    'BlockIO': parts[5],
-                    'PIDs': parts[6],
-                }
-            return stats
+            return result.stdout.strip().strip('"')
         except subprocess.CalledProcessError as e:
-            return {}
+            return f"Failed to get stats for container {container_id}. Error: {e}"
 
     def parse_frr_config(self, config_content):
         lines = config_content.strip().splitlines()
@@ -146,12 +133,7 @@ class FRRConfigExtractor:
         formatted_output.append("="*60)
         formatted_output.append(f"Container ID: {container_id}")
         formatted_output.append(f"Hostname: {hostname}")
-        if container_id in stats:
-            formatted_output.append(f"Stats: CPU: {stats[container_id]['CPU']}, Memory: {stats[container_id]['Memory']}, "
-                                    f"Net I/O: {stats[container_id]['NetIO']}, Block I/O: {stats[container_id]['BlockIO']}, "
-                                    f"PIDs: {stats[container_id]['PIDs']}")
-        else:
-            formatted_output.append("Stats: Not available")
+        formatted_output.append(f"Stats: {stats}")
         formatted_output.append("="*60)
         formatted_output.append("Interface Configuration:")
         formatted_output.append(interfaces)
@@ -207,8 +189,6 @@ class FRRConfigExtractor:
         running_containers = self.get_running_containers()
         matched_container_ids = self.match_ids_with_containers(lab_id_from_unl, running_containers)
         
-        container_stats = self.get_container_stats()
-        
         if matched_container_ids:
             with open(self.output_file_path, 'w') as output_file:
                 output_file.write(topology_info)
@@ -217,7 +197,8 @@ class FRRConfigExtractor:
                 for container_id in matched_container_ids:
                     config_content = self.get_frr_config_from_container(container_id)
                     hostname, interfaces, router_configs = self.parse_frr_config(config_content)
-                    formatted_output = self.format_output(container_id, hostname, interfaces, router_configs, container_stats)
+                    stats = self.get_container_stats(container_id)
+                    formatted_output = self.format_output(container_id, hostname, interfaces, router_configs, stats)
                     output_file.write(formatted_output)
                     print(formatted_output)
             print(f"Configuration information written to {self.output_file_path}")
