@@ -39,9 +39,10 @@ class FrrContainerManager:
     def parse_frr_conf(self, frr_conf):
         data = {
             'hostname': None,
-            'missing_sections': []
+            'missing_sections': [],
+            'is_configured': False  # 用于标识是否有任何配置
         }
-    
+
         has_bgp = False
         has_ospf = False
         has_static_route = False
@@ -71,7 +72,12 @@ class FrrContainerManager:
         if not has_static_route:
             data['missing_sections'].append('static route')
 
+    # 如果至少有一个配置存在，则标记为已配置
+        if has_bgp or has_ospf or has_static_route:
+            data['is_configured'] = True
+
         return data
+
 
     def save_missing_info_to_txt(self, data, output_file):
         translations = {
@@ -85,9 +91,12 @@ class FrrContainerManager:
                 for container_id, details in data.items():
                     router_name = details.get('hostname', '未知路由器')
 
-                    if details['missing_sections']:
-                        for section in details['missing_sections']:
-                            txt_file.write(f"{router_name} 路由器缺少 {translations.get(section, section)}\n")
+                    if not details['is_configured']:
+                        txt_file.write(f"新入网 {router_name} 路由器尚未配置\n")
+                    else:
+                        if details['missing_sections']:
+                            for section in details['missing_sections']:
+                                txt_file.write(f"{router_name} 路由器缺少 {translations.get(section, section)}\n")
 
                 print(f"缺失信息成功保存到 {output_file}")
             return True

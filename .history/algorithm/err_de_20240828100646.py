@@ -121,8 +121,10 @@ class FrrContainerManager:
                 if frr_conf:
                     parsed_conf = self.parse_frr_conf(frr_conf)
                     self.frr_conf_data[cid] = {
+            
                         "hostname": parsed_conf['hostname'],
-                        "missing_sections": parsed_conf['missing_sections']
+                        "missing_sections": parsed_conf['missing_sections'],
+                        "missing_parameters": parsed_conf['missing_parameters']
                     }
                 else:
                     print(f"Could not retrieve frr.conf from container {cid}.")
@@ -132,7 +134,7 @@ class FrrContainerManager:
             else:
                 print("No frr.conf data to save.")
         else:
-            print("No running containers found for image.")
+            print(f"No running containers found for image ")
 
 
 class ExperimentProcessor:

@@ -16,7 +16,7 @@ class FrrContainerManager:
             container_id, container_name = line.split(maxsplit=1)
             containers[container_name] = container_id
         return containers
-  
+
     def match_ids_with_containers(self, lab_id, containers):
         matched_containers = []
         for container_name, container_id in containers.items():
@@ -39,14 +39,11 @@ class FrrContainerManager:
     def parse_frr_conf(self, frr_conf):
         data = {
             'hostname': None,
-            'missing_sections': []
+            'missing_sections': [],
+            'missing_parameters': {}
         }
-    
-        has_bgp = False
-        has_ospf = False
-        has_static_route = False
-
         lines = frr_conf.splitlines()
+        current_section = None
 
         for line in lines:
             line = line.strip()
@@ -54,22 +51,24 @@ class FrrContainerManager:
             if line.startswith('hostname'):
                 data['hostname'] = line.split()[1]
 
-            elif line.startswith('router bgp'):
-                has_bgp = True
+            elif line.startswith('router '):
+                current_section = line.split()[1]
+                if current_section not in data['missing_parameters']:
+                    data['missing_parameters'][current_section] = []
 
-            elif line.startswith('router ospf'):
-                has_ospf = True
+            elif current_section and line and not line.startswith('!'):
+                if 'bgp' in current_section and 'bgp router-id' not in line:
+                    data['missing_parameters']['bgp'].append('bgp router-id')
+                if 'ospf' in current_section and 'ospf router-id' not in line and 'network' not in line:
+                    data['missing_parameters']['ospf'] = ['ospf router-id', 'network']
 
-            elif line.startswith('ip route'):
-                has_static_route = True
+            elif line == '!':
+                current_section = None
 
-    # 检查是否缺少BGP、OSPF或静态路由配置
-        if not has_bgp:
-            data['missing_sections'].append('bgp')
-        if not has_ospf:
-            data['missing_sections'].append('ospf')
-        if not has_static_route:
-            data['missing_sections'].append('static route')
+        required_sections = ['bgp', 'ospf']
+        for section in required_sections:
+            if section not in data['missing_parameters']:
+                data['missing_sections'].append(section)
 
         return data
 
@@ -77,7 +76,9 @@ class FrrContainerManager:
         translations = {
             'bgp': 'BGP配置',
             'ospf': 'OSPF配置',
-            'static route': '静态路由配置'
+            'bgp router-id': 'BGP路由器ID',
+            'ospf router-id': 'OSPF路由器ID',
+            'network': '网络'
         }
 
         try:
@@ -87,13 +88,17 @@ class FrrContainerManager:
 
                     if details['missing_sections']:
                         for section in details['missing_sections']:
-                            txt_file.write(f"{router_name} 路由器缺少 {translations.get(section, section)}\n")
+                            txt_file.write(f"{router_name} 路由器缺少 {translations.get(section, section)} 配置信息\n")
 
-                print(f"缺失信息成功保存到 {output_file}")
-            return True
+                    if details['missing_parameters']:
+                        for section, params in details['missing_parameters'].items():
+                            for param in params:
+                                txt_file.write(f"{router_name} 路由器缺少 {translations.get(param, param)} 配置信息\n")
+                    txt_file.write("\n")
+
+            print(f"缺失信息成功保存到 {output_file}")
         except IOError as e:
             print(f"保存文件时发生错误: {e}")
-            return False
 
     def process_containers(self, processor: 'ExperimentProcessor'):
         lab_id = processor.get_lab_id_from_param_json()
@@ -121,8 +126,10 @@ class FrrContainerManager:
                 if frr_conf:
                     parsed_conf = self.parse_frr_conf(frr_conf)
                     self.frr_conf_data[cid] = {
+            
                         "hostname": parsed_conf['hostname'],
-                        "missing_sections": parsed_conf['missing_sections']
+                        "missing_sections": parsed_conf['missing_sections'],
+                        "missing_parameters": parsed_conf['missing_parameters']
                     }
                 else:
                     print(f"Could not retrieve frr.conf from container {cid}.")
@@ -132,7 +139,7 @@ class FrrContainerManager:
             else:
                 print("No frr.conf data to save.")
         else:
-            print("No running containers found for image.")
+            print(f"No running containers found for image ")
 
 
 class ExperimentProcessor:

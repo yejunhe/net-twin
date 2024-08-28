@@ -77,7 +77,9 @@ class FrrContainerManager:
         translations = {
             'bgp': 'BGP配置',
             'ospf': 'OSPF配置',
-            'static route': '静态路由配置'
+            'bgp router-id': 'BGP路由器ID',
+            'ospf router-id': 'OSPF路由器ID',
+            'network': '网络'
         }
 
         try:
@@ -87,13 +89,17 @@ class FrrContainerManager:
 
                     if details['missing_sections']:
                         for section in details['missing_sections']:
-                            txt_file.write(f"{router_name} 路由器缺少 {translations.get(section, section)}\n")
+                            txt_file.write(f"{router_name} 路由器缺少 {translations.get(section, section)} 配置信息\n")
 
-                print(f"缺失信息成功保存到 {output_file}")
-            return True
+                    if details['missing_parameters']:
+                        for section, params in details['missing_parameters'].items():
+                            for param in params:
+                                txt_file.write(f"{router_name} 路由器缺少 {translations.get(param, param)} 配置信息\n")
+                    txt_file.write("\n")
+
+            print(f"缺失信息成功保存到 {output_file}")
         except IOError as e:
             print(f"保存文件时发生错误: {e}")
-            return False
 
     def process_containers(self, processor: 'ExperimentProcessor'):
         lab_id = processor.get_lab_id_from_param_json()
@@ -121,8 +127,10 @@ class FrrContainerManager:
                 if frr_conf:
                     parsed_conf = self.parse_frr_conf(frr_conf)
                     self.frr_conf_data[cid] = {
+            
                         "hostname": parsed_conf['hostname'],
-                        "missing_sections": parsed_conf['missing_sections']
+                        "missing_sections": parsed_conf['missing_sections'],
+                        "missing_parameters": parsed_conf['missing_parameters']
                     }
                 else:
                     print(f"Could not retrieve frr.conf from container {cid}.")
@@ -132,7 +140,7 @@ class FrrContainerManager:
             else:
                 print("No frr.conf data to save.")
         else:
-            print("No running containers found for image.")
+            print(f"No running containers found for image ")
 
 
 class ExperimentProcessor:
