@@ -1,0 +1,65 @@
+[
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32897,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32898,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32899,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32900,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32901,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32902,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32903,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32904,
+        "image_type": "huaweine40-1"
+    },
+    {
+        "nameid": "",
+        "console_type": "telnet",
+        "hostip": "172.16.40.157",
+        "port": 32905,
+        "image_type": "huaweine40-1"
+    }
+]
