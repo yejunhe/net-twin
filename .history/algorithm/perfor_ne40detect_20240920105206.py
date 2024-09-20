@@ -258,142 +258,91 @@ class RouterTelnetManager:
 
         return evaluation
 
-    def generate_performance_summary(self, evaluation):
-        """根据性能评估结果生成综合的网络性能评价。"""
-        summaries = []
-        
-        # 延迟评价
-        if evaluation["latency"] == "良好":
-            summaries.append("延迟良好")
-        elif evaluation["latency"] == "中等":
-            summaries.append("延迟中等")
-        elif evaluation["latency"] == "差":
-            summaries.append("延迟较高")
-        else:
-            summaries.append("延迟未知")
-        
-        # 抖动评价
-        if evaluation["jitter"] == "良好":
-            summaries.append("抖动小")
-        elif evaluation["jitter"] == "中等":
-            summaries.append("抖动中等")
-        elif evaluation["jitter"] == "差":
-            summaries.append("抖动较大")
-        else:
-            summaries.append("抖动未知")
-        
-        # 丢包率评价
-        if evaluation["packet_loss"] == "良好":
-            summaries.append("丢包率低")
-        elif evaluation["packet_loss"] == "中等":
-            summaries.append("丢包率中等")
-        elif evaluation["packet_loss"] == "差":
-            summaries.append("丢包率较高")
-        else:
-            summaries.append("丢包率未知")
-        
-        # 综合评估
-        if evaluation["overall_performance"] == "良好":
-            overall = "网络性能良好。"
-        elif evaluation["overall_performance"] == "中等":
-            overall = "网络性能中等。"
-        elif evaluation["overall_performance"] == "差":
-            overall = "网络性能较差。"
-        else:
-            overall = "网络性能未知。"
-        
-        # 组合所有评价
-        summary = "该设备网络性能" + "，".join(summaries) + "。" + overall
-        return summary
-
     def connect_and_get_sysnames_routes_and_nqa(self):
-        """通过 Telnet 连接每个路由器，检索 sysname、OSPF 路由，执行 NQA 测试，并评估网络性能。"""
+        """Connect to each router via Telnet, retrieve sysname, OSPF route, perform NQA test, and evaluate network performance."""
         results = []
         for node in self.telnet_info.get("node", []):
             host = node.get("hostip")
             port = node.get("port")
             if not host or not port:
-                print(f"无效的节点配置: {node}")
+                print(f"Invalid node configuration: {node}")
                 continue
 
             sysname, ospf_ip, nqa_result = self.get_sysname_and_routing_table(host, port)
             if sysname:
                 self.sysnames[f"{host}:{port}"] = sysname
-                print(f"已连接到 {host}:{port} - Sysname: {sysname}")
+                print(f"Connected to {host}:{port} - Sysname: {sysname}")
                 result_data = {"host": host, "port": port, "sysname": sysname}
 
                 if ospf_ip and nqa_result:
                     self.ospf_routes[f"{host}:{port}"] = {"ospf_ip": ospf_ip, "nqa_result": nqa_result}
-                    print(f"{host}:{port} 的 OSPF 路由: {ospf_ip}")
+                    print(f"OSPF route for {host}:{port}: {ospf_ip}")
 
                     # 解析 NQA 测试结果并进行网络性能评估
                     performance_metrics = nqa_result
                     evaluation = self.evaluate_network_performance(performance_metrics)
-                    summary = self.generate_performance_summary(evaluation)
 
                     result_data["ospf_ip"] = ospf_ip
                     result_data["nqa_result"] = performance_metrics
                     result_data["performance_evaluation"] = evaluation
-                    result_data["performance_summary"] = summary  # 添加综合评价
                 else:
                     result_data["ospf_ip"] = ospf_ip if ospf_ip else None
                     result_data["nqa_result"] = nqa_result if nqa_result else None
                     result_data["performance_evaluation"] = None
-                    result_data["performance_summary"] = "无法进行网络性能评估。"  # 没有评估结果时的默认评价
                     if not ospf_ip:
-                        print(f"{host}:{port} 未找到 OSPF 路由")
+                        print(f"No OSPF route found for {host}:{port}")
                     if not nqa_result:
-                        print(f"{host}:{port} 无 NQA 测试结果")
+                        print(f"No NQA result available for {host}:{port}")
 
-                # 将每个节点的结果追加到 results 列表
+                # 将每个节点的结果追加到results列表
                 results.append(result_data)
 
             else:
-                print(f"无法检索 {host}:{port} 的 sysname")
+                print(f"Failed to retrieve sysname for {host}:{port}")
 
         return results
 
 
 def find_latest_folder(base_path):
-    """在指定的基路径下按数字查找最新的文件夹。"""
+    """Find the latest folder by number under the given base path."""
     all_folders = [f for f in os.listdir(base_path) if f.isdigit()]
     if not all_folders:
-        raise ValueError("基路径中未找到编号文件夹。")
+        raise ValueError("No numbered folders found in the base path.")
     latest_folder = max(all_folders, key=int)
     return latest_folder
 
 
 def main(input_path, output_path):
-    # 如果使用 {t}，则解析最新的文件夹编号
+    # Resolve the latest folder number if {t} is used
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
         latest_folder = find_latest_folder(base_path)
         input_path = input_path.replace("{t}", latest_folder)
         output_path = output_path.replace("{t}", latest_folder)
 
-    # 加载 param.json
+    # Load param.json
     try:
         with open(input_path, 'r') as f:
             telnet_info = json.load(f)
     except Exception as e:
-        print(f"无法加载输入 JSON 文件 '{input_path}': {e}")
+        print(f"Failed to load input JSON file '{input_path}': {e}")
         return
 
-    # 管理 Telnet 连接
+    # Manage Telnet connections
     telnet_manager = RouterTelnetManager(telnet_info)
     results = telnet_manager.connect_and_get_sysnames_routes_and_nqa()
 
-    # 输出结果到文件
+    # Output results to file
     try:
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_path, 'w') as f:
             f.write(json.dumps(results, indent=4, ensure_ascii=False))
-        print(f"结果和性能评估已写入 {output_path}")
+        print(f"Results and performance evaluations written to {output_path}")
     except Exception as e:
-        print(f"无法写入输出 JSON 文件 '{output_path}': {e}")
+        print(f"Failed to write output JSON file '{output_path}': {e}")
 
 
 if __name__ == "__main__":
-    # 设置参数解析
+    # Set up argument parsing
     parser = argparse.ArgumentParser(description="通过 Telnet 从路由器检索 sysname、OSPF 路由，并执行 NQA 测试以评估网络性能。")
     parser.add_argument("-i", "--input", required=True, help="param.json 的路径，使用 {t} 表示最新的文件夹编号。")
     parser.add_argument("-o", "--output", required=True, help="输出路径，用于存储处理信息，使用 {t} 表示最新的文件夹编号。")

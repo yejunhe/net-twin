@@ -3,13 +3,14 @@ import telnetlib
 import os
 import argparse
 import re
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class RouterTelnetManager:
-    def __init__(self, telnet_info):
+    def __init__(self, telnet_info, max_threads=10):
         self.telnet_info = telnet_info
         self.sysnames = {}
         self.ospf_routes = {}
+        self.max_threads = max_threads  # 最大并发线程数
 
     def get_sysname_and_routing_table(self, host, port):
         """通过 Telnet 获取节点的 sysname 和 OSPF 路由表信息"""
@@ -24,6 +25,8 @@ class RouterTelnetManager:
             nqa_result = None
             while True:
                 output = tn.read_until(b'>', timeout=5)
+                if not output:
+                    break
                 lines = output.decode('ascii', errors='ignore').splitlines()
 
                 # 检查 sysname
@@ -306,53 +309,81 @@ class RouterTelnetManager:
         summary = "该设备网络性能" + "，".join(summaries) + "。" + overall
         return summary
 
+    def process_router(self, node):
+        """处理单个路由器的连接和测试，返回结果字典。"""
+        host = node.get("hostip")
+        port = node.get("port")
+        result_data = {"host": host, "port": port, "sysname": None, "ospf_ip": None, "nqa_result": None, "performance_evaluation": None, "performance_summary": None}
+
+        if not host or not port:
+            print(f"无效的节点配置: {node}")
+            result_data["performance_summary"] = "无效的节点配置。"
+            return result_data
+
+        sysname, ospf_ip, nqa_result = self.get_sysname_and_routing_table(host, port)
+        if sysname:
+            self.sysnames[f"{host}:{port}"] = sysname
+            print(f"已连接到 {host}:{port} - Sysname: {sysname}")
+            result_data["sysname"] = sysname
+
+            if ospf_ip and nqa_result:
+                self.ospf_routes[f"{host}:{port}"] = {"ospf_ip": ospf_ip, "nqa_result": nqa_result}
+                print(f"{host}:{port} 的 OSPF 路由: {ospf_ip}")
+
+                # 解析 NQA 测试结果并进行网络性能评估
+                performance_metrics = nqa_result
+                evaluation = self.evaluate_network_performance(performance_metrics)
+                summary = self.generate_performance_summary(evaluation)
+
+                result_data["ospf_ip"] = ospf_ip
+                result_data["nqa_result"] = performance_metrics
+                result_data["performance_evaluation"] = evaluation
+                result_data["performance_summary"] = summary
+            else:
+                result_data["ospf_ip"] = ospf_ip if ospf_ip else None
+                result_data["nqa_result"] = nqa_result if nqa_result else None
+                result_data["performance_evaluation"] = None
+                if not ospf_ip and not nqa_result:
+                    result_data["performance_summary"] = "无法进行网络性能评估。"
+                elif not ospf_ip:
+                    result_data["performance_summary"] = "未找到 OSPF 路由，无法进行网络性能评估。"
+                elif not nqa_result:
+                    result_data["performance_summary"] = "无 NQA 测试结果，无法进行网络性能评估。"
+        else:
+            print(f"无法检索 {host}:{port} 的 sysname")
+            result_data["performance_summary"] = "无法检索 sysname，无法进行网络性能评估。"
+
+        return result_data
+
     def connect_and_get_sysnames_routes_and_nqa(self):
         """通过 Telnet 连接每个路由器，检索 sysname、OSPF 路由，执行 NQA 测试，并评估网络性能。"""
         results = []
-        for node in self.telnet_info.get("node", []):
-            host = node.get("hostip")
-            port = node.get("port")
-            if not host or not port:
-                print(f"无效的节点配置: {node}")
-                continue
+        nodes = self.telnet_info.get("node", [])
+        if not nodes:
+            print("没有找到任何节点配置。")
+            return results
 
-            sysname, ospf_ip, nqa_result = self.get_sysname_and_routing_table(host, port)
-            if sysname:
-                self.sysnames[f"{host}:{port}"] = sysname
-                print(f"已连接到 {host}:{port} - Sysname: {sysname}")
-                result_data = {"host": host, "port": port, "sysname": sysname}
-
-                if ospf_ip and nqa_result:
-                    self.ospf_routes[f"{host}:{port}"] = {"ospf_ip": ospf_ip, "nqa_result": nqa_result}
-                    print(f"{host}:{port} 的 OSPF 路由: {ospf_ip}")
-
-                    # 解析 NQA 测试结果并进行网络性能评估
-                    performance_metrics = nqa_result
-                    evaluation = self.evaluate_network_performance(performance_metrics)
-                    summary = self.generate_performance_summary(evaluation)
-
-                    result_data["ospf_ip"] = ospf_ip
-                    result_data["nqa_result"] = performance_metrics
-                    result_data["performance_evaluation"] = evaluation
-                    result_data["performance_summary"] = summary  # 添加综合评价
-                else:
-                    result_data["ospf_ip"] = ospf_ip if ospf_ip else None
-                    result_data["nqa_result"] = nqa_result if nqa_result else None
-                    result_data["performance_evaluation"] = None
-                    result_data["performance_summary"] = "无法进行网络性能评估。"  # 没有评估结果时的默认评价
-                    if not ospf_ip:
-                        print(f"{host}:{port} 未找到 OSPF 路由")
-                    if not nqa_result:
-                        print(f"{host}:{port} 无 NQA 测试结果")
-
-                # 将每个节点的结果追加到 results 列表
-                results.append(result_data)
-
-            else:
-                print(f"无法检索 {host}:{port} 的 sysname")
+        with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
+            # 提交所有路由器的处理任务
+            future_to_node = {executor.submit(self.process_router, node): node for node in nodes}
+            for future in as_completed(future_to_node):
+                node = future_to_node[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    print(f"处理节点 {node} 时发生错误: {e}")
+                    results.append({
+                        "host": node.get("hostip"),
+                        "port": node.get("port"),
+                        "sysname": None,
+                        "ospf_ip": None,
+                        "nqa_result": None,
+                        "performance_evaluation": None,
+                        "performance_summary": "处理过程中发生错误。"
+                    })
 
         return results
-
 
 def find_latest_folder(base_path):
     """在指定的基路径下按数字查找最新的文件夹。"""
@@ -362,8 +393,7 @@ def find_latest_folder(base_path):
     latest_folder = max(all_folders, key=int)
     return latest_folder
 
-
-def main(input_path, output_path):
+def main(input_path, output_path, max_threads=10):
     # 如果使用 {t}，则解析最新的文件夹编号
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
@@ -380,7 +410,7 @@ def main(input_path, output_path):
         return
 
     # 管理 Telnet 连接
-    telnet_manager = RouterTelnetManager(telnet_info)
+    telnet_manager = RouterTelnetManager(telnet_info, max_threads=max_threads)
     results = telnet_manager.connect_and_get_sysnames_routes_and_nqa()
 
     # 输出结果到文件
@@ -391,12 +421,12 @@ def main(input_path, output_path):
     except Exception as e:
         print(f"无法写入输出 JSON 文件 '{output_path}': {e}")
 
-
 if __name__ == "__main__":
     # 设置参数解析
     parser = argparse.ArgumentParser(description="通过 Telnet 从路由器检索 sysname、OSPF 路由，并执行 NQA 测试以评估网络性能。")
     parser.add_argument("-i", "--input", required=True, help="param.json 的路径，使用 {t} 表示最新的文件夹编号。")
     parser.add_argument("-o", "--output", required=True, help="输出路径，用于存储处理信息，使用 {t} 表示最新的文件夹编号。")
+    parser.add_argument("--max-threads", type=int, default=10, help="最大并发线程数（默认为 10）。")
     args = parser.parse_args()
 
-    main(args.input, args.output)
+    main(args.input, args.output, max_threads=args.max_threads)
