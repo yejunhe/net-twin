@@ -114,10 +114,11 @@ class RouterTelnetManager:
         self.sysnames = {}
         self.neighbor_data = {}
         self.routing_tables = {}
+        self.bgp_summaries = {}  # 用于存储 BGP Summary 信息
         self.max_workers = max_workers
 
     def connect_and_collect(self, node, protocols=('isis', 'bgp', 'mpls_ldp')):
-        """连接单个路由器并收集sysname、邻居和路由表信息。"""
+        """连接单个路由器并收集sysname、邻居、路由表和BGP Summary信息。"""
         host = node["hostip"]
         port = node["port"]
         connection = RouterTelnetConnection(host, port)
@@ -160,6 +161,15 @@ class RouterTelnetManager:
             else:
                 print(f"Failed to retrieve routing table for {host}:{port}")
 
+            # 收集 BGP Summary 信息
+            bgp_summary_output = self.get_bgp_summary(connection)
+            if bgp_summary_output:
+                bgp_summary = self.parse_bgp_summary(bgp_summary_output)
+                self.bgp_summaries[f"{host}:{port}"] = bgp_summary
+                print(f"Collected BGP Summary for {host}:{port}: {bgp_summary}")
+            else:
+                print(f"Failed to retrieve BGP Summary for {host}:{port}")
+
         except Exception as e:
             print(f"Error processing {host}:{port} - {e}")
         finally:
@@ -167,7 +177,7 @@ class RouterTelnetManager:
             connection.close()
 
     def collect_neighbors_and_routing(self, protocols=('isis', 'bgp', 'mpls_ldp')):
-        """并行收集每个路由器的邻居和路由表信息。"""
+        """并行收集每个路由器的邻居、路由表和BGP Summary信息。"""
         nodes = self.telnet_info.get("node", [])
         if not nodes:
             print("No nodes found in the Telnet information.")
@@ -308,6 +318,109 @@ class RouterTelnetManager:
                 })
         return routing_entries
 
+    # 新增方法：获取 BGP Summary
+    def get_bgp_summary(self, connection):
+        """获取 BGP Summary 信息。"""
+        output = connection.send_command('display bgp all summary', wait_time=3)
+        print(f"Raw BGP Summary output on {connection.host}:{connection.port}:\n{output}")
+        return output
+
+    def parse_bgp_summary(self, output):
+        """解析 BGP Summary 输出。"""
+        bgp_summary = {
+            'router_id': None,
+            'local_as_number': None,
+            'address_family': None,
+            'total_peers': 0,
+            'peers_established': 0,
+            'peers': []
+        }
+        lines = output.splitlines()
+        parsing_peers = False
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # 解析路由器ID
+            if line.startswith("BGP local router ID"):
+                parts = line.split(":")
+                if len(parts) == 2:
+                    bgp_summary['router_id'] = parts[1].strip()
+                continue
+
+            # 解析 Local AS number
+            if line.startswith("Local AS number"):
+                parts = line.split(":")
+                if len(parts) == 2:
+                    bgp_summary['local_as_number'] = parts[1].strip()
+                continue
+
+            # 解析 Address Family
+            if line.startswith("Address Family"):
+                parts = line.split(":")
+                if len(parts) == 2:
+                    bgp_summary['address_family'] = parts[1].strip()
+                continue
+
+            # 解析总对等体数量和已建立状态对等体数量
+            if line.startswith("Total number of peers"):
+                # Example line:
+                # Total number of peers : 1                 Peers in established state : 0
+                parts = line.split()
+                try:
+                    total_index = parts.index("peers") + 4  # 'peers' is part of 'peers : <number>'
+                    total_peers = int(parts[5])
+                    bgp_summary['total_peers'] = total_peers
+                except (ValueError, IndexError):
+                    pass
+
+                try:
+                    established_index = parts.index("established") + 4  # 'established' is part of 'established state : <number>'
+                    peers_established = int(parts[9])
+                    bgp_summary['peers_established'] = peers_established
+                except (ValueError, IndexError):
+                    pass
+                continue
+
+            # 解析 Peer 表头，开始解析对等体信息
+            if line.startswith("Peer") and "AS" in line and "State" in line:
+                parsing_peers = True
+                continue
+
+            if parsing_peers:
+                # 假设对等体信息位于表头之后，直到遇到空行或其他非数据行
+                if line.startswith("-") or line.startswith("Total"):
+                    parsing_peers = False
+                    continue
+                fields = line.split()
+                if len(fields) >= 7:
+                    peer_ip = fields[0]
+                    remote_as = fields[1]
+                    msg_rcvd = fields[2]
+                    msg_sent = fields[3]
+                    out_q = fields[4]
+                    up_down = fields[5]
+                    state = fields[6]
+                    # RtRcv 和 RtAdv 可能存在或缺失
+                    rt_rcv = fields[7] if len(fields) > 7 else "0"
+                    rt_adv = fields[8] if len(fields) > 8 else "0"
+
+                    bgp_summary['peers'].append({
+                        'Peer': peer_ip,
+                        'RemoteAS': remote_as,
+                        'MsgRcvd': msg_rcvd,
+                        'MsgSent': msg_sent,
+                        'OutQ': out_q,
+                        'Up/Down': up_down,
+                        'State': state,
+                        'RtRcv': rt_rcv,
+                        'RtAdv': rt_adv
+                    })
+
+        return bgp_summary
+
 
 class TopologyMapper:
     def __init__(self, unl_parser, telnet_manager):
@@ -320,7 +433,7 @@ class TopologyMapper:
         }
 
     def map_topology(self):
-        """将从Telnet获取的sysnames和neighbors映射到UNL拓扑中的节点。"""
+        """将从Telnet获取的sysnames、neighbors、routing tables和BGP summaries映射到UNL拓扑中的节点。"""
         mapping = {}
         for node_id, node_info in self.unl_parser.nodes.items():
             node_name = node_info['name']
@@ -346,15 +459,20 @@ class TopologyMapper:
                             'Interface': entry['Interface']
                         })
 
+                    # 获取 BGP Summary 数据
+                    bgp_summary = self.telnet_manager.bgp_summaries.get(host_port, {})
+                    print(f"    Found BGP Summary for {host_port}: {bgp_summary}")
+
                     mapping[node_id] = {
                         'node_name': node_name,
                         'host_port': host_port,
                         'sysname': collected_sysname,
                         'neighbors': self.telnet_manager.neighbor_data.get(host_port, {}),
-                        'routing_table': routing_by_proto  # 路由表数据
+                        'routing_table': routing_by_proto,  # 路由表数据
+                        'bgp_summary': bgp_summary  # 新增 BGP Summary 数据
                     }
                     print(f"  Mapped node '{node_name}' to sysname '{collected_sysname}'")
-        print("Mapping between UNL topology, Telnet sysnames, neighbors, and routing tables:")
+        print("Mapping between UNL topology, Telnet sysnames, neighbors, routing tables, and BGP summaries:")
         print(json.dumps(mapping, indent=4))
         return mapping
 
@@ -400,7 +518,7 @@ def main(input_path, output_path):
 
     with open(output_path, 'w') as f:
         f.write(json.dumps(mapping, indent=4))
-    print(f"Mapping results with neighbors and routing tables written to {output_path}")
+    print(f"Mapping results with neighbors, routing tables, and BGP summaries written to {output_path}")
 
 
 if __name__ == "__main__":

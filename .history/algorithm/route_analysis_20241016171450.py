@@ -288,4 +288,3 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
     args = parser.parse_args()
     main(args.input, args.output)
-

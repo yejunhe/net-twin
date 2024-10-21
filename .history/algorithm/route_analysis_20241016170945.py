@@ -27,11 +27,6 @@ class RouterManager:
         self.max_workers = max_workers
         self.telnet_lock = Lock()
         self.docker_lock = Lock()
-        # Define command sequences for different device types
-        self.commands_map = {
-            "h3c": (['screen-length disable', 'display ip routing-table'], b'quit\n'),
-            "huaweine40": (['scr 0 t', 'display ip routing-table'], b'q\n')
-        }
 
     def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: list, quit_cmd: bytes) -> str:
         try:
@@ -88,13 +83,15 @@ class RouterManager:
             return None
 
     def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[str]:
-        # Find matching device type based on partial image_type
-        matched_key = next((key for key in self.commands_map if key in image_type), None)
-        if not matched_key:
+        commands_map = {
+            "h3c": (['screen-length disable', 'display ip routing-table'], b'quit\n'),
+            "huaweine40": (['scr 0 t', 'display ip routing-table'], b'q\n')
+        }
+        commands, quit_cmd = commands_map.get(image_type, ([], b''))
+        if not commands:
             logging.warning(f"[{tn.host}:{tn.port}] Unsupported image_type '{image_type}'. Skipping.")
             return None
 
-        commands, quit_cmd = self.commands_map[matched_key]
         output = self.execute_telnet_commands(tn, commands, quit_cmd)
         if output:
             sysname = self.get_sysname_via_telnet(tn)
@@ -182,11 +179,10 @@ class RouterManager:
                 if "frrouting" in image_type:
                     docker_id = node.get("dockerid")
                     if docker_id:
-                        future = executor.submit(self.connect_via_docker, docker_id)
-                        future_to_node[future] = node
+                        future_to_node[executor.submit(self.connect_via_docker, docker_id)] = node
                     else:
                         logging.warning("No Docker ID provided for node with image_type 'frrouting'. Skipping.")
-                elif any(sub in image_type for sub in self.commands_map.keys()):
+                elif "h3c" in image_type or "huaweine40" in image_type:
                     host, port = node.get("hostip"), node.get("port")
                     if not host or not port:
                         logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
@@ -194,13 +190,9 @@ class RouterManager:
                     try:
                         tn = telnetlib.Telnet(host, port, timeout=10)
                         tn.host, tn.port = host, port
-                        future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
-                        future_to_node[future] = node
+                        future_to_node[executor.submit(self.get_configuration_via_telnet, tn, image_type)] = node
                     except Exception as e:
                         logging.error(f"Failed to connect to {host}:{port} via Telnet: {e}")
-                else:
-                    logging.warning(f"Unknown image_type '{image_type}' for node. Skipping.")
-
             for future in as_completed(future_to_node):
                 node = future_to_node[future]
                 image_type = node.get("image_type", "").lower()
@@ -209,7 +201,7 @@ class RouterManager:
                     success = future.result()
                     msg = "successful" if success else "failed"
                     logging.info(f"[Docker:{docker_id}] Configuration retrieval {msg}.")
-                elif any(sub in image_type for sub in self.commands_map.keys()):
+                elif "h3c" in image_type or "huaweine40" in image_type:
                     host, port = node.get("hostip"), node.get("port")
                     config = future.result()
                     msg = "successful" if config else "failed"
@@ -288,4 +280,3 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
     args = parser.parse_args()
     main(args.input, args.output)
-
