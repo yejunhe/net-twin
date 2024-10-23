@@ -38,7 +38,7 @@ class RouterManager:
             'interface Ethernet1/0/0': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/1': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/2': ['undo shutdown', 'ip address'],
-            'interface LoopBack0': ['ip address'],
+            'interface LoopBack0': ['ip address', 'ospf enable'],
             'interface NULL0': None  # 仅检查'interface NULL0'关键字是否存在
             # 可根据需要添加更多需要检查的配置块及其检查模式
         }
@@ -193,19 +193,18 @@ class RouterManager:
         checks = {}
         # 将清理后的配置块分割为列表
         cleaned_blocks = cleaned_config.split('#\n#\n')
+        # 创建一个字典，键为配置块名称，值为配置块内容
+        cleaned_blocks_content = {block.splitlines()[0].strip(): block for block in cleaned_blocks if block.strip()}
 
         for block, patterns in self.required_blocks.items():
             if patterns is None:
                 # 对于模式为 None 的配置块，仅检查关键字是否存在于整个配置中
                 # 使用正则表达式确保关键字为独立的词
                 pattern = re.compile(r'\b' + re.escape(block) + r'\b', re.IGNORECASE)
-                matching_blocks = [blk.strip() for blk in cleaned_blocks if pattern.search(blk)]
-                if matching_blocks:
-                    # 提取所有匹配的块内容，并用分号分隔
-                    content = '; '.join(matching_blocks)
+                if pattern.search(cleaned_config):
                     checks[block] = {
                         "status": "已配置",
-                        "content": content
+                        "content": self.extract_content_for_keyword(block, cleaned_config)
                     }
                 else:
                     checks[block] = {
@@ -214,11 +213,8 @@ class RouterManager:
                     }
             else:
                 # 对于有指定模式的配置块，检查配置块是否存在
-                # 查找以该块名称开头的配置块
-                block_pattern = re.compile(r'^' + re.escape(block) + r'\b', re.IGNORECASE)
-                matched_blocks = [blk for blk in cleaned_blocks if block_pattern.match(blk)]
-                if matched_blocks:
-                    block_content = matched_blocks[0]
+                if block in cleaned_blocks_content:
+                    block_content = cleaned_blocks_content[block]
                     # 检查所有指定的模式是否存在于配置块中
                     if all(any(pattern in line for line in block_content.splitlines()) for pattern in patterns):
                         checks[block] = {
@@ -236,6 +232,14 @@ class RouterManager:
                         "content": ""
                     }
         return checks
+
+    def extract_content_for_keyword(self, keyword: str, cleaned_config: str) -> str:
+        """
+        提取包含关键字的行内容。
+        """
+        pattern = re.compile(r'^.*\b' + re.escape(keyword) + r'\b.*$', re.MULTILINE | re.IGNORECASE)
+        match = pattern.findall(cleaned_config)
+        return '; '.join(match) if match else ""
 
     def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[str]:
         # 根据部分image_type找到匹配的设备类型
@@ -299,10 +303,10 @@ class RouterManager:
                 "blocks": {}
             }
             for block, result in checks.items():
-                if result["status"] == "已配置":
-                    combined_checks[host_port]["blocks"][block] = f"{block}已配置，内容为{result['content']}"
-                else:
-                    combined_checks[host_port]["blocks"][block] = f"{block}未配置"
+                combined_checks[host_port]["blocks"][block] = {
+                    "status": result["status"],
+                    "content": result["content"]
+                }
         return {
             "telnet_devices": combined_checks
         }

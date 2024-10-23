@@ -38,7 +38,7 @@ class RouterManager:
             'interface Ethernet1/0/0': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/1': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/2': ['undo shutdown', 'ip address'],
-            'interface LoopBack0': ['ip address'],
+            'interface LoopBack0': ['ip address', 'ospf enable'],
             'interface NULL0': None  # 仅检查'interface NULL0'关键字是否存在
             # 可根据需要添加更多需要检查的配置块及其检查模式
         }

@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import logging
 from typing import Optional, Dict, Any, List
-import re
 
 # 配置日志记录，便于跟踪和控制
 logging.basicConfig(
@@ -21,7 +20,8 @@ class RouterManager:
     def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
         self.telnet_info = telnet_info
         self.telnet_sysnames: Dict[str, str] = {}
-        self.config_checks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.telnet_configurations: Dict[str, str] = {}
+        self.config_checks: Dict[str, Dict[str, str]] = {}
         self.max_workers = max_workers
         self.telnet_lock = Lock()
         # 为不同设备类型定义命令序列
@@ -32,9 +32,9 @@ class RouterManager:
         # 如果值为None，则只检查关键字的存在性
         self.required_blocks = {
             'sysname': None,  # 仅检查'sysname'关键字是否存在
-            'bgp': ['router-id', 'peer'],       # 检查'bgp'块是否包含指定模式
-            'ospf': ['area', 'network'],       # 检查'ospf'块是否包含指定模式
-            'isis': ['is-level', 'network-entity'],  # 检查'isis'块是否包含指定模式
+            'bgp': None,       # 仅检查'bgp'关键字是否存在
+            'ospf': None,      # 仅检查'ospf'关键字是否存在
+            'isis': None,      # 仅检查'isis'关键字是否存在
             'interface Ethernet1/0/0': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/1': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/2': ['undo shutdown', 'ip address'],
@@ -183,58 +183,37 @@ class RouterManager:
         logging.debug("清理后的配置:\n" + cleaned_config)
         return cleaned_config
 
-    def check_required_blocks(self, cleaned_config: str) -> Dict[str, Dict[str, Any]]:
+    def check_required_blocks(self, cleaned_config: str) -> Dict[str, str]:
         """
         检查清理后的配置中是否包含所有必需的配置块。
         对于每个配置块，如果配置模式为 None，则仅检查关键字是否存在于整个配置中。
         否则，检查配置块的存在性以及指定的配置模式是否匹配。
-        返回一个字典，键为配置块名称，值为包含状态和内容的子字典。
+        返回一个字典，键为配置块名称，值为状态（'已配置' 或 '缺少配置'）。
         """
         checks = {}
         # 将清理后的配置块分割为列表
         cleaned_blocks = cleaned_config.split('#\n#\n')
+        # 创建一个字典，键为配置块名称，值为配置块内容
+        cleaned_blocks_content = {block.splitlines()[0].strip(): block for block in cleaned_blocks if block.strip()}
 
         for block, patterns in self.required_blocks.items():
             if patterns is None:
                 # 对于模式为 None 的配置块，仅检查关键字是否存在于整个配置中
-                # 使用正则表达式确保关键字为独立的词
-                pattern = re.compile(r'\b' + re.escape(block) + r'\b', re.IGNORECASE)
-                matching_blocks = [blk.strip() for blk in cleaned_blocks if pattern.search(blk)]
-                if matching_blocks:
-                    # 提取所有匹配的块内容，并用分号分隔
-                    content = '; '.join(matching_blocks)
-                    checks[block] = {
-                        "status": "已配置",
-                        "content": content
-                    }
+                if block in cleaned_config:
+                    checks[block] = "已配置"
                 else:
-                    checks[block] = {
-                        "status": "缺少配置",
-                        "content": ""
-                    }
+                    checks[block] = "缺少配置"
             else:
                 # 对于有指定模式的配置块，检查配置块是否存在
-                # 查找以该块名称开头的配置块
-                block_pattern = re.compile(r'^' + re.escape(block) + r'\b', re.IGNORECASE)
-                matched_blocks = [blk for blk in cleaned_blocks if block_pattern.match(blk)]
-                if matched_blocks:
-                    block_content = matched_blocks[0]
+                if block in cleaned_blocks_content:
+                    block_content = cleaned_blocks_content[block]
                     # 检查所有指定的模式是否存在于配置块中
                     if all(any(pattern in line for line in block_content.splitlines()) for pattern in patterns):
-                        checks[block] = {
-                            "status": "已配置",
-                            "content": block_content.strip()
-                        }
+                        checks[block] = "已配置"
                     else:
-                        checks[block] = {
-                            "status": "缺少配置",
-                            "content": ""
-                        }
+                        checks[block] = "缺少配置"
                 else:
-                    checks[block] = {
-                        "status": "缺少配置",
-                        "content": ""
-                    }
+                    checks[block] = "缺少配置"
         return checks
 
     def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[str]:
@@ -256,6 +235,7 @@ class RouterManager:
                 key = f"{tn.host}:{tn.port}"
                 with self.telnet_lock:
                     self.telnet_sysnames[key] = sysname
+                    self.telnet_configurations[key] = cleaned_output  # 存储清理后的配置
                     self.config_checks[key] = checks  # 存储检查结果
         else:
             logging.warning(f"[{tn.host}:{tn.port}] 从Telnet命令未收到输出。")
@@ -292,19 +272,15 @@ class RouterManager:
                 logging.info(f"[{host}:{port}] 配置检索 {msg}。")
 
     def collect_results(self) -> Dict[str, Any]:
-        combined_checks = {}
-        for host_port, checks in self.config_checks.items():
-            combined_checks[host_port] = {
-                "sysname": self.telnet_sysnames.get(host_port, "未知"),
-                "blocks": {}
-            }
-            for block, result in checks.items():
-                if result["status"] == "已配置":
-                    combined_checks[host_port]["blocks"][block] = f"{block}已配置，内容为{result['content']}"
-                else:
-                    combined_checks[host_port]["blocks"][block] = f"{block}未配置"
         return {
-            "telnet_devices": combined_checks
+            "telnet_devices": {
+                host_port: {
+                    "sysname": sysname,
+                    "configuration": self.telnet_configurations.get(host_port, 'No config'),
+                    "configuration_checks": self.config_checks.get(host_port, {})
+                }
+                for host_port, sysname in self.telnet_sysnames.items()
+            }
         }
 
 def find_latest_folder(base_path: str) -> str:
