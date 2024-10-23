@@ -1,0 +1,469 @@
+import json
+import telnetlib
+import os
+import argparse
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+import logging
+from typing import Optional, Dict, Any, List
+import re  # 引入正则表达式模块
+
+# 配置日志记录
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+class RouterManager:
+    def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
+        self.telnet_info = telnet_info
+        self.telnet_sysnames: Dict[str, str] = {}
+        self.telnet_configurations: Dict[str, str] = {}
+        self.telnet_routing_tables: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        self.telnet_ospf_interfaces: Dict[str, List[Dict[str, Any]]] = {}
+        self.max_workers = max_workers
+        self.telnet_lock = Lock()
+        # 定义不同设备类型的命令序列
+        self.commands_map = {
+            "huaweine40": (
+                [
+                    'scr 0 t',
+                    'display ip routing-table',
+                    'display ospf brief',
+                    'display acl all',
+                    'display bgp all summary',
+                    'display ip interface brief'
+                ],
+                b'q\n'
+            )
+            # 可以在此处添加更多设备类型及其对应的命令序列
+        }
+
+    def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: list, quit_cmd: bytes) -> str:
+        try:
+            tn.write(b'\n')
+            time.sleep(1)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
+            logging.debug(f"[{tn.host}:{tn.port}] Initial Telnet output:\n{output}")
+
+            for cmd in commands:
+                tn.write(cmd.encode('ascii') + b'\n')
+                logging.info(f"[{tn.host}:{tn.port}] Sending command: {cmd}")
+                time.sleep(1)
+                cmd_output = tn.read_very_eager().decode('ascii', errors='ignore')
+                output += cmd_output
+                logging.debug(f"[{tn.host}:{tn.port}] Output for '{cmd}':\n{cmd_output}")
+
+            prompt = self.get_prompt(tn)
+            if prompt and not (prompt.startswith('<') and prompt.endswith('>')):
+                tn.write(quit_cmd)
+                logging.info(f"[{tn.host}:{tn.port}] Sending quit command.")
+                time.sleep(1)
+                output += tn.read_very_eager().decode('ascii', errors='ignore')
+            return output
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] Telnet Error: {e}")
+            return ""
+
+    def get_prompt(self, tn: telnetlib.Telnet) -> Optional[str]:
+        try:
+            time.sleep(1)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
+            lines = output.splitlines()
+            prompt = lines[-1].strip() if lines else None
+            logging.debug(f"[{tn.host}:{tn.port}] Detected prompt: {prompt}")
+            return prompt
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] Error getting prompt: {e}")
+            return None
+
+    def get_sysname_via_telnet(self, tn: telnetlib.Telnet) -> Optional[str]:
+        try:
+            tn.write(b'\n')
+            time.sleep(1)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
+            for line in output.splitlines():
+                if line.startswith('<') and line.endswith('>'):
+                    sysname = line.strip('<> ').strip()
+                    logging.info(f"[{tn.host}:{tn.port}] Detected sysname: {sysname}")
+                    return sysname
+            logging.warning(f"[{tn.host}:{tn.port}] No sysname detected.")
+            return None
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] Telnet Error while getting sysname: {e}")
+            return None
+
+    def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[str]:
+        # 根据部分image_type查找匹配的设备类型
+        matched_key = next((key for key in self.commands_map if key in image_type), None)
+        if not matched_key:
+            logging.warning(f"[{tn.host}:{tn.port}] Unsupported image_type '{image_type}'. Skipping.")
+            return None
+
+        commands, quit_cmd = self.commands_map[matched_key]
+        output = self.execute_telnet_commands(tn, commands, quit_cmd)
+        if output:
+            sysname = self.get_sysname_via_telnet(tn)
+            if sysname:
+                key = f"{tn.host}:{tn.port}"
+                with self.telnet_lock:
+                    self.telnet_sysnames[key] = sysname
+                    self.telnet_configurations[key] = self.clean_configuration_output(output)
+                    routing_table = self.parse_routing_table(output)
+                    if routing_table:
+                        self.telnet_routing_tables[key] = routing_table
+                    ospf_interfaces = self.parse_ospf_brief(output)
+                    if ospf_interfaces:
+                        self.telnet_ospf_interfaces[key] = ospf_interfaces
+        else:
+            logging.warning(f"[{tn.host}:{tn.port}] No output received from Telnet commands.")
+        return output
+
+    def clean_configuration_output(self, output: str) -> str:
+        """
+        清理Telnet命令输出，保留关键信息，去除无用部分。
+        """
+        # 定义需要保留的关键部分的模式
+        keep_patterns = [
+            r"Routing Table : _public_",
+            r"Destination/Mask\s+Proto\s+Pre\s+Cost\s+Flags\s+NextHop\s+Interface",
+            r"OSPF Process",
+            r"BGP local router ID",
+            r"Address Family:Ipv4 Unicast",
+            r"Peer\s+AS\s+MsgRcvd\s+MsgSent\s+OutQ\s+Up/Down\s+State\s+RtRcv\s+RtAdv",
+            r"Interface\s+IP Address/Mask\s+Physical\s+Protocol\s+VPN"
+        ]
+
+        # 将输出按行分割
+        lines = output.splitlines()
+        cleaned_lines = []
+        keep_section = False
+
+        for line in lines:
+            # 检查是否进入需要保留的部分
+            if any(re.search(pattern, line) for pattern in keep_patterns):
+                keep_section = True
+
+            # 如果当前行是分隔线，则跳过
+            if re.match(r"=+", line) or re.match(r"-+", line):
+                continue
+
+            # 如果进入了需要保留的部分，则保留该行
+            if keep_section:
+                # 排除以特定字符开头的行
+                if not re.match(r"^(Device:|Route Flags:|.*\*\w+|!down:|\^down:|.*\(.*\)|Helper support capability|Multi-VPN-Instance|TCP Port)", line):
+                    # 排除空行
+                    if line.strip():
+                        cleaned_lines.append(line.strip())
+
+            # 如果遇到另一个设备标识，则停止保留部分
+            if re.match(r"Device:", line):
+                keep_section = False
+
+        # 将保留的行重新组合成字符串
+        cleaned_output = "\n".join(cleaned_lines)
+        return cleaned_output
+
+    def parse_routing_table(self, output: str) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+        """
+        解析 'display ip routing-table' 的输出，并按协议Proto进行分类。
+        """
+        try:
+            # 定位 'display ip routing-table' 输出的开始
+            routing_table_start = re.search(r"display ip routing-table", output, re.IGNORECASE)
+            if not routing_table_start:
+                logging.warning("Routing table section not found in the output.")
+                return None
+
+            # 从 'display ip routing-table' 开始提取相关内容
+            routing_table_output = output[routing_table_start.start():]
+
+            # 进一步定位表头
+            header_match = re.search(r"Destination/Mask\s+Proto\s+Pre\s+Cost\s+Flags\s+NextHop\s+Interface", routing_table_output)
+            if not header_match:
+                logging.warning("Routing table header not found.")
+                return None
+
+            # Extract lines after the header
+            lines = routing_table_output[header_match.end():].splitlines()
+
+            routing_entries = []
+            for line in lines:
+                # Stop parsing if an empty line or a new section starts
+                if not line.strip() or line.startswith("OSPF Process") or line.startswith("BGP local router ID"):
+                    break
+
+                # Match the routing entry line using regex
+                # Example line:
+                # 0.0.0.0/0   Static  60   0             RD  192.168.1.1                              Ethernet1/0/0.192
+                entry_match = re.match(r"(\S+)\s+(\S+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)", line)
+                if entry_match:
+                    destination = entry_match.group(1)
+                    proto = entry_match.group(2)
+                    pre = entry_match.group(3)
+                    cost = entry_match.group(4)
+                    flags = entry_match.group(5)
+                    next_hop = entry_match.group(6)
+                    interface = entry_match.group(7)
+
+                    entry = {
+                        "Destination/Mask": destination,
+                        "Proto": proto,
+                        "Pre": int(pre),
+                        "Cost": int(cost),
+                        "Flags": flags,
+                        "NextHop": next_hop,
+                        "Interface": interface
+                    }
+                    routing_entries.append(entry)
+                else:
+                    # Handle entries that span multiple lines (e.g., multiple Protos for a Destination)
+                    # Example:
+                    # 10.0.12.0/24  OSPF    10   2             D   10.0.13.1                                Ethernet1/0/1
+                    #               OSPF    10   2             D   10.0.23.1                                Ethernet1/0/0
+                    sub_entry_match = re.match(r"\s+(\S+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)", line)
+                    if sub_entry_match and routing_entries:
+                        proto = sub_entry_match.group(1)
+                        pre = sub_entry_match.group(2)
+                        cost = sub_entry_match.group(3)
+                        flags = sub_entry_match.group(4)
+                        next_hop = sub_entry_match.group(5)
+                        interface = sub_entry_match.group(6)
+
+                        entry = {
+                            "Destination/Mask": routing_entries[-1]["Destination/Mask"],  # Inherit from the previous entry
+                            "Proto": proto,
+                            "Pre": int(pre),
+                            "Cost": int(cost),
+                            "Flags": flags,
+                            "NextHop": next_hop,
+                            "Interface": interface
+                        }
+                        routing_entries.append(entry)
+                    else:
+                        logging.debug(f"Unmatched routing table line: {line}")
+
+            # Group entries by Proto
+            routing_table_by_proto: Dict[str, List[Dict[str, Any]]] = {}
+            for entry in routing_entries:
+                proto = entry["Proto"]
+                routing_table_by_proto.setdefault(proto, []).append(entry)
+
+            logging.info("Routing table parsed and grouped by Proto.")
+            return routing_table_by_proto
+        except Exception as e:
+            logging.error(f"Error parsing routing table: {e}")
+            return None
+
+    def parse_ospf_brief(self, output: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        解析 'display ospf brief' 的输出，并提取接口信息。
+        """
+        try:
+            # 定位 'display ospf brief' 输出的 start
+            ospf_brief_start = re.search(r"display ospf brief", output, re.IGNORECASE)
+            if not ospf_brief_start:
+                logging.warning("'display ospf brief' section not found in the output.")
+                return None
+
+            # 从 'display ospf brief' 开始提取相关内容
+            ospf_brief_output = output[ospf_brief_start.start():]
+
+            # Locate the 'Interface:' lines
+            interface_matches = re.finditer(r"Interface:\s+(\S+)\s+\(([^)]+)\)\s+Cost:\s+(\d+)\s+State:\s+(\S+)\s+Type:\s+(\S+)\s+MTU:\s+(\d+)\n\s+Priority:\s+(\d+)\n\s+Designated Router:\s+(\S+)\n\s+Backup Designated Router:\s+(\S+)\n\s+Timers:\s+Hello\s+(\d+)\s*,\s*Dead\s+(\d+)\s*,\s*Wait\s+(\d+)\s*,\s*Poll\s+(\d+)\s*,\s*Retransmit\s+(\d+)\s*,\s*Transmit Delay\s+(\d+)", ospf_brief_output, re.MULTILINE)
+
+            ospf_interfaces = []
+
+            for match in interface_matches:
+                interface_info = {
+                    "Interface": match.group(1),
+                    "Interface Description": match.group(2),
+                    "Cost": int(match.group(3)),
+                    "State": match.group(4),
+                    "Type": match.group(5),
+                    "MTU": int(match.group(6)),
+                    "Priority": int(match.group(7)),
+                    "Designated Router": match.group(8),
+                    "Backup Designated Router": match.group(9),
+                    "Timers": {
+                        "Hello": int(match.group(10)),
+                        "Dead": int(match.group(11)),
+                        "Wait": int(match.group(12)),
+                        "Poll": int(match.group(13)),
+                        "Retransmit": int(match.group(14)),
+                        "Transmit Delay": int(match.group(15))
+                    }
+                }
+                ospf_interfaces.append(interface_info)
+                logging.debug(f"Parsed OSPF interface: {interface_info}")
+
+            if ospf_interfaces:
+                logging.info("OSPF brief parsed and interface information extracted.")
+                return ospf_interfaces
+            else:
+                logging.warning("No OSPF interface information found.")
+                return None
+        except Exception as e:
+            logging.error(f"Error parsing OSPF brief: {e}")
+            return None
+
+    def connect_and_get_sysnames_and_configs(self):
+        nodes = self.telnet_info.get("node", [])
+        if not nodes:
+            logging.warning("No nodes found in telnet_info.")
+            return
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_node = {}
+            for node in nodes:
+                image_type = node.get("image_type", "").lower()
+                if "huaweine40" in image_type:
+                    host, port = node.get("hostip"), node.get("port")
+                    if not host or not port:
+                        logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
+                        continue
+                    try:
+                        tn = telnetlib.Telnet(host, port, timeout=10)
+                        tn.host, tn.port = host, port
+                        future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
+                        future_to_node[future] = node
+                    except Exception as e:
+                        logging.error(f"Failed to connect to {host}:{port} via Telnet: {e}")
+
+            for future in as_completed(future_to_node):
+                node = future_to_node[future]
+                host, port = node.get("hostip"), node.get("port")
+                config = future.result()
+                msg = "successful" if config else "failed"
+                logging.info(f"[{host}:{port}] Configuration retrieval {msg}.")
+
+    def collect_results(self) -> Dict[str, Any]:
+        return {
+            "telnet_devices": {
+                host_port: {
+                    "sysname": sysname,
+                    "configuration": self.telnet_configurations.get(host_port, 'No config'),
+                    "routing_table_by_proto": self.telnet_routing_tables.get(host_port, {}),
+                    "ospf_interfaces": self.telnet_ospf_interfaces.get(host_port, [])
+                }
+                for host_port, sysname in self.telnet_sysnames.items()
+            }
+        }
+
+    def write_configurations_to_file(self, output_path: str):
+        try:
+            with open(output_path, 'w') as f:
+                for host_port, configuration in self.telnet_configurations.items():
+                    f.write(f"Device: {host_port}\n")
+                    f.write(configuration)
+                    f.write("\n" + "="*40 + "\n")
+
+                # Additionally, write the routing tables grouped by Proto
+                f.write("\nRouting Tables Grouped by Proto:\n")
+                f.write("="*40 + "\n")
+                for host_port, routing_table in self.telnet_routing_tables.items():
+                    f.write(f"Device: {host_port}\n")
+                    for proto, entries in routing_table.items():
+                        f.write(f"  Proto: {proto}\n")
+                        for entry in entries:
+                            f.write(f"    Destination/Mask: {entry['Destination/Mask']}\n")
+                            f.write(f"    Pre: {entry['Pre']}\n")
+                            f.write(f"    Cost: {entry['Cost']}\n")
+                            f.write(f"    Flags: {entry['Flags']}\n")
+                            f.write(f"    NextHop: {entry['NextHop']}\n")
+                            f.write(f"    Interface: {entry['Interface']}\n")
+                            f.write("\n")
+                        f.write("-"*20 + "\n")
+                    f.write("\n" + "="*40 + "\n")
+
+                # Additionally, write the OSPF interface information
+                f.write("\nOSPF Interfaces:\n")
+                f.write("="*40 + "\n")
+                for host_port, ospf_interfaces in self.telnet_ospf_interfaces.items():
+                    f.write(f"Device: {host_port}\n")
+                    for interface in ospf_interfaces:
+                        f.write(f"  Interface: {interface['Interface']} ({interface['Interface Description']})\n")
+                        f.write(f"    Cost: {interface['Cost']}\n")
+                        f.write(f"    State: {interface['State']}\n")
+                        f.write(f"    Type: {interface['Type']}\n")
+                        f.write(f"    MTU: {interface['MTU']}\n")
+                        f.write(f"    Priority: {interface['Priority']}\n")
+                        f.write(f"    Designated Router: {interface['Designated Router']}\n")
+                        f.write(f"    Backup Designated Router: {interface['Backup Designated Router']}\n")
+                        f.write(f"    Timers:\n")
+                        f.write(f"      Hello: {interface['Timers']['Hello']}s\n")
+                        f.write(f"      Dead: {interface['Timers']['Dead']}s\n")
+                        f.write(f"      Wait: {interface['Timers']['Wait']}s\n")
+                        f.write(f"      Poll: {interface['Timers']['Poll']}s\n")
+                        f.write(f"      Retransmit: {interface['Timers']['Retransmit']}s\n")
+                        f.write(f"      Transmit Delay: {interface['Timers']['Transmit Delay']}s\n\n")
+                    f.write("="*40 + "\n")
+            logging.info(f"Configurations, Routing Tables, and OSPF Interfaces written to {output_path}")
+        except IOError as e:
+            logging.error(f"Error writing configurations to file: {e}")
+
+def find_latest_folder(base_path: str) -> str:
+    try:
+        all_folders = [f for f in os.listdir(base_path) if f.isdigit()]
+        if not all_folders:
+            raise ValueError("No numbered folders found in the base path.")
+        latest_folder = max(all_folders, key=int)
+        logging.info(f"Latest folder identified: {latest_folder}")
+        return latest_folder
+    except FileNotFoundError:
+        logging.error(f"Base path not found: {base_path}")
+        sys.exit(1)
+    except ValueError as ve:
+        logging.error(ve)
+        sys.exit(1)
+
+def load_telnet_info(input_path: str) -> Dict[str, Any]:
+    try:
+        with open(input_path, 'r') as f:
+            telnet_info = json.load(f)
+        logging.info(f"Successfully loaded telnet_info from {input_path}")
+        return telnet_info
+    except FileNotFoundError:
+        logging.error(f"param.json file not found at path: {input_path}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding JSON from param.json: {e}")
+        sys.exit(1)
+
+def write_output(output_path: str, data: Dict[str, Any]):
+    try:
+        with open(output_path, 'w') as f:
+            json.dump(data, f, indent=4)
+        logging.info(f"Mapping results written to {output_path}")
+    except IOError as e:
+        logging.error(f"Error writing to output file: {e}")
+        sys.exit(1)
+
+def main(input_path: str, output_path: str):
+    base_path = "/uploadPath/reasoning"
+    if "{t}" in input_path or "{t}" in output_path:
+        latest_folder = find_latest_folder(base_path)
+        input_path = input_path.replace("{t}", latest_folder)
+        output_path = output_path.replace("{t}", latest_folder)
+        logging.debug(f"Resolved input_path: {input_path}")
+        logging.debug(f"Resolved output_path: {output_path}")
+
+    telnet_info = load_telnet_info(input_path)
+    router_manager = RouterManager(telnet_info)
+    router_manager.connect_and_get_sysnames_and_configs()
+    mapping = router_manager.collect_results()
+
+    logging.info("Collected router configurations:")
+    logging.info(json.dumps(mapping, indent=4))
+    write_output(output_path, mapping)
+    router_manager.write_configurations_to_file(output_path.replace('.json', '_configurations.txt'))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Process router configurations from param.json.")
+    parser.add_argument("-i", "--input", required=True, help="Path to param.json, use {t} for latest folder number.")
+    parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
+    args = parser.parse_args()
+    main(args.input, args.output)
