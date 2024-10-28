@@ -9,6 +9,7 @@ from threading import Lock
 import logging
 from typing import Optional, Dict, Any, List
 import re
+import xml.etree.ElementTree as ET
 
 # 配置日志记录，便于跟踪和控制
 logging.basicConfig(
@@ -21,7 +22,7 @@ class RouterManager:
     def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
         self.telnet_info = telnet_info
         self.telnet_sysnames: Dict[str, str] = {}
-        self.config_checks: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.config_checks: Dict[str, Dict[str, Any]] = {}
         self.max_workers = max_workers
         self.telnet_lock = Lock()
         # 为不同设备类型定义命令序列
@@ -32,9 +33,9 @@ class RouterManager:
         # 如果值为None，则只检查关键字的存在性
         self.required_blocks = {
             'sysname': None,  # 仅检查'sysname'关键字是否存在
-            'bgp': ['router-id', 'peer'],       # 检查'bgp'块是否包含指定模式
-            'ospf': ['area', 'network'],       # 检查'ospf'块是否包含指定模式
-            'isis': ['is-level', 'network-entity'],  # 检查'isis'块是否包含指定模式
+            'bgp': None,       # 检查'bgp'块是否包含指定模式
+            'ospf 1': None,    # 检查'ospf'块是否包含指定模式
+            'isis 1': None,    # 检查'isis'块是否包含指定模式
             'interface Ethernet1/0/0': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/1': ['undo shutdown', 'ip address'],
             'interface Ethernet1/0/2': ['undo shutdown', 'ip address'],
@@ -344,6 +345,142 @@ def write_output(output_path: str, data: Dict[str, Any]):
         logging.error(f"写入输出文件时出错: {e}")
         sys.exit(1)
 
+def read_unl_file(lab_id: int) -> Optional[str]:
+    """
+    根据 labId 读取对应的 .unl 文件内容。
+    """
+    unl_file_path = f"/opt/unetlab/labs/{lab_id}/{lab_id}.unl"  # 修改为正确的路径
+    if os.path.exists(unl_file_path):
+        try:
+            with open(unl_file_path, 'r', encoding='utf-8') as f:
+                unl_content = f.read()
+            logging.info(f"成功读取 .unl 文件: {unl_file_path}")
+            return unl_content
+        except Exception as e:
+            logging.error(f"读取 .unl 文件时出错: {e}")
+            return None
+    else:
+        logging.error(f".unl 文件不存在: {unl_file_path}")
+        return None
+
+def parse_unl_content(unl_content: str) -> Optional[Dict[str, Any]]:
+    """
+    解析 .unl 文件的 XML 内容，整理为网络拓扑结构。
+    """
+    try:
+        root = ET.fromstring(unl_content)
+        topology = root.find('topology')
+        if topology is None:
+            logging.error("XML中未找到'topology'元素。")
+            return None
+
+        # 解析节点
+        nodes = []
+        nodes_xml = topology.find('nodes')
+        if nodes_xml is not None:
+            for node in nodes_xml.findall('node'):
+                node_info = {
+                    "id": node.get("id"),
+                    "name": node.get("name"),
+                    "image": node.get("image"),
+                    "ethernet": node.get("ethernet"),
+                    "interfaces": []
+                }
+
+                # 解析接口
+                for interface in node.findall('interface'):
+                    interface_info = {
+                        "id": interface.get("id"),
+                        "name": interface.get("name"),
+                        "type": interface.get("type"),
+                        "network_id": interface.get("network_id")
+                    }
+                    node_info["interfaces"].append(interface_info)
+                nodes.append(node_info)
+
+        # 解析网络
+        networks = []
+        networks_xml = topology.find('networks')
+        if networks_xml is not None:
+            for network in networks_xml.findall('network'):
+                network_info = {
+                    "id": network.get("id"),
+                    "name": network.get("name")
+                }
+                networks.append(network_info)
+
+        network_topology = {
+            "nodes": nodes,
+            "networks": networks
+        }
+
+        logging.info("成功解析 .unl 文件内容为网络拓扑结构。")
+        return network_topology
+
+    except ET.ParseError as e:
+        logging.error(f"解析 XML 时出错: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"解析 .unl 文件内容时发生错误: {e}")
+        return None
+
+def annotate_network_topology(network_topology: Dict[str, Any],
+                              telnet_devices: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    将网络拓扑结构中的节点名称与telnet获取的sysname对应，
+    并判断拓扑结构中哪些接口已配置，哪些尚未配置。
+    """
+    # 构建sysname到配置检查的映射
+    sysname_to_checks = {}
+    for device in telnet_devices.values():
+        sysname = device.get("sysname")
+        checks = device.get("blocks", {})
+        if sysname:
+            sysname_to_checks[sysname] = checks
+
+    # 接口类型映射
+    type_mapping = {
+        "ethernet": "Ethernet",
+        "gigabitethernet": "GigabitEthernet",
+        # 根据实际情况添加更多类型映射
+    }
+
+    # 遍历拓扑中的节点
+    for node in network_topology.get("nodes", []):
+        node_name = node.get("name")
+        # 对应到sysname
+        checks = sysname_to_checks.get(node_name)
+        if not checks:
+            # 如果没有找到对应的sysname配置，标记所有接口为未配置
+            for interface in node.get("interfaces", []):
+                interface["configured"] = False
+            continue
+
+        # 遍历节点的接口
+        for interface in node.get("interfaces", []):
+            interface_type = interface.get("type")
+            interface_name = interface.get("name")
+
+            # 映射接口类型
+            interface_type_mapped = type_mapping.get(interface_type.lower(), interface_type.capitalize())
+
+            # 处理接口名称：例如将 'e1/0/0' 转换为 '1/0/0'
+            match = re.match(r'^[a-zA-Z]+(\d+/\d+/\d+)', interface_name)
+            if match:
+                interface_number = match.group(1)
+            else:
+                interface_number = interface_name  # 如果没有匹配，保持原样
+
+            # 组合接口类型和名称，并添加前缀 'interface '
+            required_block_name = f"interface {interface_type_mapped}{interface_number}"
+
+            # 检查该接口是否已配置
+            is_configured = checks.get(required_block_name, {}).get("status") == "已配置"
+            interface["configured"] = is_configured
+
+    logging.info("已注释网络拓扑结构中的接口配置状态。")
+    return network_topology
+
 def main(input_path: str, output_path: str):
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
@@ -354,11 +491,36 @@ def main(input_path: str, output_path: str):
         logging.debug(f"解析后的output_path: {output_path}")
 
     telnet_info = load_telnet_info(input_path)
+
+    # 新增功能：读取 labId 并读取对应的 .unl 文件
+    lab_id = telnet_info.get("labId")
+    if lab_id is not None:
+        logging.info(f"找到 labId: {lab_id}")
+        unl_content = read_unl_file(lab_id)
+        if unl_content:
+            network_topology = parse_unl_content(unl_content)
+        else:
+            network_topology = None
+    else:
+        logging.warning("param.json中未找到labId。")
+        unl_content = None
+        network_topology = None
+
     router_manager = RouterManager(telnet_info)
     router_manager.connect_and_get_sysnames_and_configs()
     mapping = router_manager.collect_results()
 
-    logging.info("收集到的路由器配置:")
+    # 将 .unl 文件内容解析后的网络拓扑结构包含在输出中
+    if network_topology:
+        # 注释网络拓扑结构中的接口配置状态
+        network_topology = annotate_network_topology(network_topology, mapping.get("telnet_devices", {}))
+
+    mapping['unl_file'] = {
+        "labId": lab_id if lab_id is not None else "未提供",
+        "network_topology": network_topology if network_topology is not None else "解析失败或未提供"
+    }
+
+    logging.info("收集到的路由器配置和网络拓扑结构:")
     logging.info(json.dumps(mapping, indent=4, ensure_ascii=False))
     write_output(output_path, mapping)
 
