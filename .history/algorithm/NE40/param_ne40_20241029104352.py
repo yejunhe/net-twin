@@ -371,6 +371,11 @@ class RouterManager:
             return None
 
 
+
+
+
+
+
     def collect_results(self) -> Dict[str, Any]:
         """
         收集所有结果，进行接口匹配，并输出包括OSPF、ISIS和BGP状态的接口配置信息。

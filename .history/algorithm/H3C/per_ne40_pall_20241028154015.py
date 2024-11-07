@@ -42,7 +42,7 @@ class RouterTelnetManager:
                     print(f"Sysname for {host}:{port} is {sysname}")
 
                     # 发送 scr 0 t 指令以确保可以正确输出路由表
-                    tn.write(b'scr 0 t\n')
+                    tn.write(b'screen-length disable\n')
                     tn.read_until(b'>', timeout=3)
 
                     # 发送命令获取路由表
@@ -69,12 +69,12 @@ class RouterTelnetManager:
     def parse_routing_table(self, routing_table):
         """解析路由表，找到第一次出现 OSPF 的目的地址，并去掉子网掩码"""
         for line in routing_table.splitlines():
-            if 'OSPF' in line:
+            if 'IS_L1' in line:
                 parts = line.split()
                 if parts:
                     # 提取目的地址并去除子网掩码（如果有）
                     dest_ip = parts[0].split('/')[0]
-                    print(f"Found OSPF route: {dest_ip}")
+                    print(f"Found IS_L1 route: {dest_ip}")
                     return dest_ip
         print("No OSPF route found")
         return None
@@ -88,30 +88,26 @@ class RouterTelnetManager:
 
             # 配置 NQA 测试实例
             nqa_commands = [
-                b'nqa test-instance admin perfor_test\n',
-                b'test-type icmpjitter\n',
-                f'destination-address ipv4 {dest_ip}\n'.encode('ascii'),
-                b'probe-count 2\n',
-                b'interval milliseconds 100\n',
-                b'timeout 1\n'
+                b'nqa entry admin perfor_test\n',
+                b'type icmp-jitter\n',
+                f'destination ip {dest_ip}\n'.encode('ascii'),
+                b'frequency 100\n',
+                b'quit\n',
+                
             ]
             for cmd in nqa_commands:
                 tn.write(cmd)
                 tn.read_until(b']', timeout=3)
-
+            
             # 发送命令开始测试
-            tn.write(b'start now\n')
-            tn.read_until(b']', timeout=3)
-
-            # 确保配置提交
-            tn.write(b'commit\n')
+            tn.write(b'nqa schedule admin perfor_test start-time now lifetime forever\n')
             tn.read_until(b']', timeout=3)
 
             # 尝试获取 NQA 测试结果
             attempt_count = 0
             result = ""
             while attempt_count < max_attempts:
-                tn.write(b'display nqa results test-instance admin perfor_test\n')
+                tn.write(b'display nqa result admin perfor_test\n')
                 partial_output = tn.read_until(b'>', timeout=5).decode('ascii')
                 result += partial_output
 
@@ -131,16 +127,7 @@ class RouterTelnetManager:
             print(result)
 
             # 执行结束和清理命令
-            tn.write(b'stop\n')
-            tn.read_until(b'>', timeout=3)
-
-            tn.write(b'q\n')
-            tn.read_until(b'>', timeout=3)
-
-            tn.write(b'undo nqa test-instance admin perfor_test\n')
-            tn.read_until(b']', timeout=3)
-
-            tn.write(b'commit\n')
+            tn.write(b'undo nqa schedule admin perfor_test\n')
             tn.read_until(b']', timeout=3)
 
             # 解析并返回性能评估输入
@@ -158,56 +145,71 @@ class RouterTelnetManager:
         metrics = {
             "latency": None,
             "jitter": None,
-            "packet_loss": None
+            "packet_loss": None,
+            "total_sent": None,
+            "total_received": None,
+            "min_rtt": None,
+            "max_rtt": None,
+            "avg_rtt": None,
+            "sd_avg": None,
+            "ds_avg": None,
         }
 
         # 定义每个性能指标的正则表达式
-        rtt_pattern = re.compile(r'Min/Max/Avg/Sum RTT:(\d+)/(\d+)/(\d+)/(\d+)')
-        jitter_pattern = re.compile(r'Average of Jitter:\s*(\d+(\.\d+)?)')
-        packet_loss_pattern = re.compile(r'Packet Loss Ratio:\s*(\d+(\.\d+)?)\s*%')
+        rtt_pattern = re.compile(r'Min/Max/Average round trip time:\s*(\d+)/(\d+)/(\d+)')
+        packet_loss_pattern = re.compile(r'Packet loss ratio:\s*(\d+(\.\d+)?)%')
+        sent_received_pattern = re.compile(r'Send operation times:\s*(\d+)\s+Receive response times:\s*(\d+)')
+        sd_pattern = re.compile(r'SD average:\s*(\d+)')
 
         for line in nqa_result.splitlines():
             line = line.strip()
-            
+
             # 解析 RTT (延迟)
             rtt_match = rtt_pattern.search(line)
             if rtt_match:
                 try:
-                    latency_avg = float(rtt_match.group(3))  # 平均 RTT 是第3个捕获组
-                    metrics["latency"] = latency_avg
-                    print(f"解析延迟 (平均 RTT): {latency_avg} ms")
+                    metrics["min_rtt"] = int(rtt_match.group(1))
+                    metrics["max_rtt"] = int(rtt_match.group(2))
+                    metrics["avg_rtt"] = int(rtt_match.group(3))
+                    print(f"解析延迟 (最小/最大/平均 RTT): {metrics['min_rtt']} / {metrics['max_rtt']} / {metrics['avg_rtt']} ms")
                 except ValueError as e:
-                    print(f"无法解析延迟，行: '{line}'。错误: {e}")
-                    metrics["latency"] = None
+                    print(f"无法解析 RTT，行: '{line}'。错误: {e}")
 
-            # 解析抖动 (Jitter)
-            jitter_match = jitter_pattern.search(line)
-            if jitter_match:
-                try:
-                    jitter_value = float(jitter_match.group(1))
-                    metrics["jitter"] = jitter_value
-                    print(f"解析抖动 (平均抖动): {jitter_value} ms")
-                except ValueError as e:
-                    print(f"无法解析抖动，行: '{line}'。错误: {e}")
-                    metrics["jitter"] = None
-
-            # 解析丢包率 (Packet Loss Ratio)
+            # 解析丢包率
             packet_loss_match = packet_loss_pattern.search(line)
             if packet_loss_match:
                 try:
-                    packet_loss = float(packet_loss_match.group(1))
-                    metrics["packet_loss"] = packet_loss
-                    print(f"解析丢包率: {packet_loss} %")
+                    metrics["packet_loss"] = float(packet_loss_match.group(1))
+                    print(f"解析丢包率: {metrics['packet_loss']} %")
                 except ValueError as e:
                     print(f"无法解析丢包率，行: '{line}'。错误: {e}")
-                    metrics["packet_loss"] = None
 
-        # 如果所有指标都无法解析，记录原始 NQA 结果以便调试
+            # 解析发送和接收的操作次数
+            sent_received_match = sent_received_pattern.search(line)
+            if sent_received_match:
+                try:
+                    metrics["total_sent"] = int(sent_received_match.group(1))
+                    metrics["total_received"] = int(sent_received_match.group(2))
+                    print(f"解析发送/接收次数: 发送 {metrics['total_sent']}，接收 {metrics['total_received']}")
+                except ValueError as e:
+                    print(f"无法解析发送/接收次数，行: '{line}'。错误: {e}")
+
+            # 解析 SD 平均值
+            sd_match = sd_pattern.search(line)
+            if sd_match:
+                try:
+                    metrics["sd_avg"] = int(sd_match.group(1))
+                    print(f"解析 SD 平均值: {metrics['sd_avg']}")
+                except ValueError as e:
+                    print(f"无法解析 SD 平均值，行: '{line}'。错误: {e}")
+
+        # 记录原始 NQA 结果以便调试
         if all(value is None for value in metrics.values()):
             print("所有性能指标均为 None。原始 NQA 结果:")
             print(nqa_result)
 
         return metrics
+
 
     def evaluate_network_performance(self, metrics):
         """根据性能指标评估网络性能，并以中文表述结果。"""
@@ -219,8 +221,8 @@ class RouterTelnetManager:
         }
 
         # 定义性能评估的阈值
-        latency_thresholds = {"good": 100, "average": 200}
-        jitter_thresholds = {"good": 50, "average": 100}
+        latency_thresholds = {"good": 50, "average": 100}
+        jitter_thresholds = {"good": 20, "average": 50}
         packet_loss_thresholds = {"good": 1, "average": 5}
 
         # 评估延迟

@@ -219,8 +219,8 @@ class RouterTelnetManager:
         }
 
         # 定义性能评估的阈值
-        latency_thresholds = {"good": 100, "average": 200}
-        jitter_thresholds = {"good": 50, "average": 100}
+        latency_thresholds = {"good": 50, "average": 100}
+        jitter_thresholds = {"good": 20, "average": 50}
         packet_loss_thresholds = {"good": 1, "average": 5}
 
         # 评估延迟

@@ -49,6 +49,40 @@ class RouterManager:
             )
         }
 
+    def standardize_interface_name(self, interface_name: str) -> Optional[str]:
+        """
+        将接口名称标准化为统一格式，例如将 'GE1/0' 转换为 'GigabitEthernet1/0'。
+
+        :param interface_name: 原始接口名称。
+        :return: 标准化后的接口名称，或 None 如果无法标准化。
+        """
+        interface_mapping = {
+            'ge': 'GigabitEthernet',
+            'gi': 'GigabitEthernet',
+            'eth': 'Ethernet',
+            'Ethernet ': 'Ethernet',
+            'loop': 'Loopback',
+            'lo': 'Loopback',
+            # 根据实际需要添加更多接口类型的映射
+        }
+
+        # 正则表达式匹配接口类型和编号，例如 'GE1/0' 或 'Loop0'
+        pattern = re.compile(r'^([a-zA-Z]+)(\d+)(?:/(\d+))?$')
+        match = pattern.match(interface_name.lower())
+        if match:
+            iface_type, slot, port = match.groups()
+            standardized_type = interface_mapping.get(iface_type, iface_type.capitalize())
+            if port:
+                # 构建标准化接口名称，包含 '/' 和端口号
+                standardized_name = f"{standardized_type}{slot}/{port}"
+            else:
+                # 构建标准化接口名称，不包含 '/'
+                standardized_name = f"{standardized_type}{slot}"
+            return standardized_name
+        else:
+            logging.warning(f"无法标准化的接口名称: {interface_name}")
+            return None
+
     def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: List[str], quit_cmd: bytes) -> Dict[str, str]:
         """
         Execute a series of Telnet commands and return their outputs.
@@ -136,14 +170,14 @@ class RouterManager:
                         self.telnet_configurations[key] = parsed_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ip interface brief' output.")
-                
+
                     # Parse 'display ospf interface'
                     if 'display ospf interface' in command_outputs:
                         ospf_interfaces = self.parse_display_ospf_interface(command_outputs['display ospf interface'])
                         self.telnet_ospf_interfaces[key] = ospf_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ospf interface' output.")
-                
+
                     # Parse 'display ospf peer'
                     if 'display ospf peer' in command_outputs:
                         ospf_peer_output = command_outputs['display ospf peer']
@@ -152,7 +186,7 @@ class RouterManager:
                             self.telnet_router_ids[key] = router_id
                         if neighbors is not None:
                             self.telnet_ospf_peers[key] = neighbors
-                
+
                     # Parse 'display isis interface'
                     if 'display isis interface' in command_outputs:
                         isis_output = command_outputs['display isis interface']
@@ -160,7 +194,7 @@ class RouterManager:
                         self.telnet_isis_interfaces[key] = isis_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display isis interface' output.")
-                
+
                     # Parse 'display isis peer'
                     if 'display isis peer' in command_outputs:
                         isis_peer_output = command_outputs['display isis peer']
@@ -169,7 +203,7 @@ class RouterManager:
                             self.telnet_isis_peers_count[key] = isis_peers
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display isis peer' output.")
-                
+
                     # Parse 'display bgp all summary'
                     if 'display bgp all summary' in command_outputs:
                         bgp_output = command_outputs['display bgp all summary']
@@ -246,14 +280,12 @@ class RouterManager:
             if len(parts) < 1:
                 continue
             iface = parts[0]
-            # Map interface name to standardized format
-            if iface.lower().startswith('eth'):
-                iface_number = iface[3:]  # Remove 'Eth' prefix
-                iface_formatted = f"Ethernet{iface_number}"
+            standardized_iface = self.standardize_interface_name(iface)
+            if standardized_iface:
+                interfaces.append(standardized_iface)
+                logging.debug(f"Detected ISIS-configured interface: {standardized_iface}")
             else:
-                iface_formatted = iface.capitalize()  # e.g., 'Loop0' stays as 'Loop0'
-            interfaces.append(iface_formatted)
-            logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
+                logging.warning(f"无法标准化的 ISIS 接口名称: {iface}")
         
         logging.debug(f"Parsed ISIS interfaces: {interfaces}")
         return interfaces
@@ -405,15 +437,22 @@ class RouterManager:
                 if match:
                     ip_address = match.group('ip_address')
                     if ip_address.lower() != 'unassigned':
-                        interface_info = {
-                            'Interface': match.group('interface'),
-                            'IP Address/Mask': match.group('ip_address'),
-                            'Physical': match.group('physical'),
-                            'Protocol': match.group('protocol'),
-                            'VPN': match.group('vpn')
-                        }
-                        interfaces.append(interface_info)
-                        logging.debug(f"Parsed interface: {interface_info}")
+                        original_iface = match.group('interface')
+                        standardized_iface = self.standardize_interface_name(original_iface)
+                        if standardized_iface:
+                            interface_info = {
+                                'Interface': standardized_iface,
+                                'IP Address/Mask': match.group('ip_address'),
+                                'Physical': match.group('physical'),
+                                'Protocol': match.group('protocol'),
+                                'VPN': match.group('vpn')
+                            }
+                            interfaces.append(interface_info)
+                            logging.debug(f"Parsed interface: {interface_info}")
+                        else:
+                            logging.warning(f"无法标准化的接口名称: {original_iface}")
+                    else:
+                        logging.debug(f"接口 {match.group('interface')} 未分配 IP 地址，已跳过。")
                 else:
                     logging.debug(f"Unmatched line in 'display ip interface brief': {line}")
                     continue
@@ -447,24 +486,13 @@ class RouterManager:
                 # Match interface lines
                 match = interface_regex.match(line)
                 if match:
-                    iface = match.group('interface')
-                    logging.debug(f"Found OSPF interface: {iface}")
-                    # Format interface name
-                    if iface.lower().startswith('eth'):
-                        iface_number = iface[3:]  # Remove 'Eth' prefix
-                        iface_formatted = f"Ethernet{iface_number}"
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    elif iface.lower().startswith('loop'):
-                        # Handle Loop interfaces like Loop0
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                    original_iface = match.group('interface')
+                    standardized_iface = self.standardize_interface_name(original_iface)
+                    if standardized_iface:
+                        interfaces.append(standardized_iface)
+                        logging.debug(f"Found OSPF interface: {standardized_iface}")
                     else:
-                        # Handle other interface types as needed
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                        logging.warning(f"无法标准化的 OSPF 接口名称: {original_iface}")
                 else:
                     logging.debug(f"Unmatched OSPF interface line: {line}")
         logging.debug(f"Parsed OSPF interfaces: {interfaces}")
@@ -537,17 +565,15 @@ class RouterManager:
             bgp_info_dict[host_port] = {}
 
             for iface in node_interfaces:
-                # Format interface name, e.g., type="ethernet" name="e1/0/0" => "Ethernet1/0/0"
+                # Format interface name using standardization method
                 iface_name = iface['name']
-                if iface_name.lower().startswith('e'):
-                    iface_number = iface_name[1:]  # Remove 'e' prefix
-                    iface_formatted = f"Ethernet{iface_number}"
-                else:
-                    # If interface name does not start with 'e', format as per type
-                    iface_formatted = f"{iface['type'].capitalize()}{iface['name']}"
+                standardized_iface = self.standardize_interface_name(iface_name)
+                if not standardized_iface:
+                    logging.warning(f"[{host_port}] 无法标准化的接口名称: {iface_name}")
+                    standardized_iface = iface_name  # Fallback to original name
 
-                iface_formatted_lower = iface_formatted.lower()
-                logging.debug(f"[{host_port}] Formatted interface name: {iface_formatted}")
+                iface_formatted_lower = standardized_iface.lower()
+                logging.debug(f"[{host_port}] Formatted interface name: {standardized_iface}")
 
                 # Determine if interface has IP configured
                 config_status = "已配置IP地址" if iface_formatted_lower in telnet_interface_names else "未配置IP地址"
@@ -558,7 +584,7 @@ class RouterManager:
                 # Determine ISIS configuration status
                 isis_iface_status = "ISIS已配置" if iface_formatted_lower in isis_interfaces_lower else "ISIS未配置"
 
-                status = f"{iface_formatted}接口配置状态: {config_status}, {ospf_iface_status}, {isis_iface_status}"
+                status = f"{standardized_iface}接口配置状态: {config_status}, {ospf_iface_status}, {isis_iface_status}"
                 interface_status[host_port].append(status)
                 logging.info(f"[{host_port}] {status}")
 
@@ -702,9 +728,9 @@ class RouterManager:
                     connection = {
                         "network_id": network_id,
                         "node1": interfaces[0]["node_name"],
-                        "interface1": interfaces[0]["interface_name"],
+                        "interface1": self.standardize_interface_name(interfaces[0]["interface_name"]) or interfaces[0]["interface_name"],
                         "node2": interfaces[1]["node_name"],
-                        "interface2": interfaces[1]["interface_name"]
+                        "interface2": self.standardize_interface_name(interfaces[1]["interface_name"]) or interfaces[1]["interface_name"]
                     }
                     connections.append(connection)
                     logging.info(f"Connected {connection['node1']}:{connection['interface1']} <-> {connection['node2']}:{connection['interface2']} via network_id {network_id}")

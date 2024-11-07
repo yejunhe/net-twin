@@ -18,6 +18,41 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
+def normalize_interface_name(interface_name: str) -> str:
+    """
+    标准化接口名称，将不同格式（如'e1/0/0'、'E1/0/0'、'Eth1/0/0'、'Ethernet1/0/0'、'Ethernet 1/0/0'）转换为统一格式'Ethernet1/0/0'。
+
+    :param interface_name: 原始接口名称。
+    :return: 标准化后的接口名称。
+    """
+    interface_name = interface_name.strip()
+    original_name = interface_name  # 保存原始名称用于日志
+    normalized_name = interface_name  # 默认保持原样
+
+    # 处理以 'e' 或 'E' 开头的接口名称，如 'e1/0/0' 或 'E1/0/0'
+    if re.match(r'^[eE]\d+/\d+/\d+$', interface_name):
+        iface_number = interface_name[1:]  # 移除 'e' 或 'E' 前缀
+        normalized_name = f"Ethernet{iface_number}"
+    # 处理以 'Eth' 开头的接口名称，如 'Eth1/0/0'
+    elif re.match(r'^Eth\d+/\d+/\d+$', interface_name, re.IGNORECASE):
+        iface_number = re.sub(r'^Eth', '', interface_name, flags=re.IGNORECASE)
+        normalized_name = f"Ethernet{iface_number}"
+    # 处理带有空格的 'Ethernet' 接口名称，如 'Ethernet 1/0/0'
+    elif re.match(r'^Ethernet\s*\d+/\d+/\d+$', interface_name, re.IGNORECASE):
+        # 移除 'Ethernet' 后的空格
+        iface_number = re.sub(r'^Ethernet\s*', '', interface_name, flags=re.IGNORECASE)
+        normalized_name = f"Ethernet{iface_number}"
+    # 如果已经是 'Ethernet' 开头且无空格，如 'Ethernet1/0/0'
+    elif re.match(r'^Ethernet\d+/\d+/\d+$', interface_name, re.IGNORECASE):
+        # 确保 'Ethernet' 首字母大写，其余保持不变
+        normalized_name = 'Ethernet' + interface_name[8:]
+    else:
+        # 对于其他接口类型，保持原样或根据需要进行其他处理
+        normalized_name = interface_name.capitalize()
+
+    logging.debug(f"Normalizing interface name: '{original_name}' -> '{normalized_name}'")
+    return normalized_name
+
 class RouterManager:
     def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
         self.telnet_info = telnet_info
@@ -29,6 +64,8 @@ class RouterManager:
         self.telnet_isis_interfaces: Dict[str, List[str]] = {}  # Interfaces configured with ISIS
         self.telnet_isis_peers_count: Dict[str, int] = {}  # ISIS peer counts per device
         self.telnet_bgp_info: Dict[str, Dict[str, Any]] = {}  # BGP info per device
+        self.telnet_routing_table: Dict[str, Dict[str, Any]] = {}  # Routing table info per device
+        self.telnet_tracert_output: Dict[str, Dict[str, Any]] = {}  # Tracert output and status per device
         self.network_connections: Optional[List[Dict[str, Any]]] = None
         self.node_interfaces: Dict[str, List[Dict[str, str]]] = {}  # Node interface info from UNL
         self.max_workers = max_workers
@@ -43,7 +80,8 @@ class RouterManager:
                     'display ospf peer',
                     'display isis interface',
                     'display isis peer',
-                    'display bgp all summary'
+                    'display bgp all summary',
+                    'display ip routing-table'  # 新增的命令
                 ],
                 b'q\n'
             )
@@ -92,9 +130,14 @@ class RouterManager:
             time.sleep(1)
             output = tn.read_very_eager().decode('ascii', errors='ignore')
             lines = output.splitlines()
-            prompt = lines[-1].strip() if lines else None
-            logging.debug(f"[{tn.host}:{tn.port}] Detected prompt: {prompt}")
-            return prompt
+            # 遍历每一行，寻找符合提示符格式的行
+            for line in reversed(lines):
+                line = line.strip()
+                if (line.startswith('<') and line.endswith('>')) or (line.startswith('[') and line.endswith(']')):
+                    logging.debug(f"[{tn.host}:{tn.port}] Detected prompt: {line}")
+                    return line
+            logging.debug(f"[{tn.host}:{tn.port}] No valid prompt detected.")
+            return None
         except Exception as e:
             logging.error(f"[{tn.host}:{tn.port}] Error getting prompt: {e}")
             return None
@@ -136,14 +179,14 @@ class RouterManager:
                         self.telnet_configurations[key] = parsed_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ip interface brief' output.")
-                
+
                     # Parse 'display ospf interface'
                     if 'display ospf interface' in command_outputs:
                         ospf_interfaces = self.parse_display_ospf_interface(command_outputs['display ospf interface'])
                         self.telnet_ospf_interfaces[key] = ospf_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ospf interface' output.")
-                
+
                     # Parse 'display ospf peer'
                     if 'display ospf peer' in command_outputs:
                         ospf_peer_output = command_outputs['display ospf peer']
@@ -152,7 +195,9 @@ class RouterManager:
                             self.telnet_router_ids[key] = router_id
                         if neighbors is not None:
                             self.telnet_ospf_peers[key] = neighbors
-                
+                    else:
+                        logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ospf peer' output.")
+
                     # Parse 'display isis interface'
                     if 'display isis interface' in command_outputs:
                         isis_output = command_outputs['display isis interface']
@@ -160,7 +205,7 @@ class RouterManager:
                         self.telnet_isis_interfaces[key] = isis_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display isis interface' output.")
-                
+
                     # Parse 'display isis peer'
                     if 'display isis peer' in command_outputs:
                         isis_peer_output = command_outputs['display isis peer']
@@ -169,7 +214,7 @@ class RouterManager:
                             self.telnet_isis_peers_count[key] = isis_peers
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display isis peer' output.")
-                
+
                     # Parse 'display bgp all summary'
                     if 'display bgp all summary' in command_outputs:
                         bgp_output = command_outputs['display bgp all summary']
@@ -178,6 +223,26 @@ class RouterManager:
                             self.telnet_bgp_info[key] = bgp_info
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display bgp all summary' output.")
+
+                    # 新增：解析 'display ip routing-table'
+                    if 'display ip routing-table' in command_outputs:
+                        routing_table_output = command_outputs['display ip routing-table']
+                        max_cost_dest_ip = self.parse_display_ip_routing_table(routing_table_output)
+                        if max_cost_dest_ip:
+                            self.telnet_routing_table[key] = {
+                                "max_cost_destination": max_cost_dest_ip
+                            }
+                            # 执行 tracert 命令
+                            tracert_output, tracert_status = self.execute_tracert(tn, max_cost_dest_ip)
+                            if tracert_output:
+                                self.telnet_tracert_output[key] = {
+                                    "output": tracert_output,
+                                    "status": tracert_status
+                                }
+                        else:
+                            logging.warning(f"[{tn.host}:{tn.port}] 未找到 Cost 最大的 Destination/Mask。")
+                    else:
+                        logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ip routing-table' output.")
         else:
             logging.warning(f"[{tn.host}:{tn.port}] No output received from Telnet commands.")
         return command_outputs
@@ -219,45 +284,6 @@ class RouterManager:
             logging.info("No OSPF Process information found in 'display ospf peer' output.")
             return None, None
 
-    def parse_display_isis_interface(self, output: str) -> List[str]:
-        """
-        Parse the output of 'display isis interface' to extract configured ISIS interfaces.
-
-        :param output: Output of the command.
-        :return: List of ISIS-configured interface names in standardized format.
-        """
-        interfaces = []
-        lines = output.splitlines()
-        logging.debug("Parsing 'display isis interface' output.")
-        
-        # Skip header lines until the data starts
-        data_started = False
-        for line in lines:
-            if line.strip().startswith("Interface"):
-                data_started = True
-                continue
-            if not data_started:
-                continue
-            if not line.strip() or re.match(r'^[-=]+$', line):
-                continue
-            # Example line:
-            # Eth1/0/0          001         Up          Mtu:Dn/Lnk:Dn/IP:Dn 1497 L1/L2 No/No
-            parts = line.split()
-            if len(parts) < 1:
-                continue
-            iface = parts[0]
-            # Map interface name to standardized format
-            if iface.lower().startswith('eth'):
-                iface_number = iface[3:]  # Remove 'Eth' prefix
-                iface_formatted = f"Ethernet{iface_number}"
-            else:
-                iface_formatted = iface.capitalize()  # e.g., 'Loop0' stays as 'Loop0'
-            interfaces.append(iface_formatted)
-            logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
-        
-        logging.debug(f"Parsed ISIS interfaces: {interfaces}")
-        return interfaces
-
     def parse_display_isis_peer(self, output: str) -> Optional[int]:
         """
         Parse the output of 'display isis peer' to extract the total number of ISIS peers.
@@ -283,7 +309,42 @@ class RouterManager:
         else:
             logging.info("No 'Total Peer(s):' line found in 'display isis peer' output.")
             return None
+
+    def parse_display_isis_interface(self, output: str) -> List[str]:
+        """
+        Parse the output of 'display isis interface' to extract configured ISIS interfaces.
+
+        :param output: Command output.
+        :return: List of ISIS-configured interface names in standardized format.
+        """
+        interfaces = []
+        lines = output.splitlines()
+        logging.debug("Parsing 'display isis interface' output.")
         
+        # Skip header lines until the data starts
+        data_started = False
+        for line in lines:
+            if line.strip().startswith("Interface"):
+                data_started = True
+                continue
+            if not data_started:
+                continue
+            if not line.strip() or re.match(r'^[-=]+$', line):
+                continue
+            # Example line:
+            # Eth1/0/0          001         Up          Mtu:Dn/Lnk:Dn/IP:Dn 1497 L1/L2 No/No
+            parts = line.split()
+            if len(parts) < 1:
+                continue
+            iface = parts[0]
+            # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
+            iface_formatted = normalize_interface_name(iface)
+            interfaces.append(iface_formatted)
+            logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
+        
+        logging.debug(f"Parsed ISIS interfaces: {interfaces}")
+        return interfaces
+
     def parse_display_bgp_all_summary(self, output: str) -> Optional[Dict[str, Any]]:
         """
         Parse the output of 'display bgp all summary' to extract BGP information.
@@ -405,8 +466,11 @@ class RouterManager:
                 if match:
                     ip_address = match.group('ip_address')
                     if ip_address.lower() != 'unassigned':
+                        iface = match.group('interface')
+                        # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
+                        iface_formatted = normalize_interface_name(iface)
                         interface_info = {
-                            'Interface': match.group('interface'),
+                            'Interface': iface_formatted,
                             'IP Address/Mask': match.group('ip_address'),
                             'Physical': match.group('physical'),
                             'Protocol': match.group('protocol'),
@@ -444,31 +508,155 @@ class RouterManager:
                 # Skip empty lines and separator lines
                 if not line.strip() or re.match(r'^[-=]+$', line):
                     continue
+                # Skip lines that do not start with a valid interface name
+                if line.strip().startswith("Area"):
+                    continue
+
                 # Match interface lines
                 match = interface_regex.match(line)
                 if match:
                     iface = match.group('interface')
-                    logging.debug(f"Found OSPF interface: {iface}")
-                    # Format interface name
-                    if iface.lower().startswith('eth'):
-                        iface_number = iface[3:]  # Remove 'Eth' prefix
-                        iface_formatted = f"Ethernet{iface_number}"
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    elif iface.lower().startswith('loop'):
-                        # Handle Loop interfaces like Loop0
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    else:
-                        # Handle other interface types as needed
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                    # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
+                    iface_formatted = normalize_interface_name(iface)
+                    interfaces.append(iface_formatted)
+                    logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
                 else:
                     logging.debug(f"Unmatched OSPF interface line: {line}")
         logging.debug(f"Parsed OSPF interfaces: {interfaces}")
         return interfaces
+
+    def parse_display_ip_routing_table(self, output: str) -> Optional[str]:
+        """
+        Parse the output of 'display ip routing-table' to find the Destination with the maximum Cost.
+
+        :param output: Command output.
+        :return: Destination IP without mask if found, else None.
+        """
+        max_cost = -1
+        max_cost_dest = None
+        lines = output.splitlines()
+        logging.debug("Parsing 'display ip routing-table' output.")
+
+        # Define regex to match routing table entries
+        # Assuming columns: Destination/Mask, Proto, Pre, Cost, Flags, NextHop, Interface
+        routing_entry_regex = re.compile(
+            r'^\s*(?P<destination>\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+'
+            r'(?P<proto>\S+)\s+'
+            r'(?P<pre>\d+)\s+'
+            r'(?P<cost>\d+)\s+'
+            r'(?P<flags>\S+)\s+'
+            r'(?P<next_hop>\S+)\s+'
+            r'(?P<interface>\S+)'
+        )
+
+        for line in lines:
+            match = routing_entry_regex.match(line)
+            if match:
+                destination = match.group('destination')
+                cost = int(match.group('cost'))
+                logging.debug(f"Found routing entry: Destination={destination}, Cost={cost}")
+                if cost > max_cost:
+                    max_cost = cost
+                    max_cost_dest = destination
+                    logging.debug(f"New max cost found: {max_cost} for Destination={max_cost_dest}")
+
+        if max_cost_dest:
+            # Remove the mask part
+            dest_ip = max_cost_dest.split('/')[0]
+            logging.info(f"Max Cost Destination: {dest_ip} with Cost: {max_cost}")
+            return dest_ip
+        else:
+            logging.warning("No routing entries found in 'display ip routing-table' output.")
+            return None
+
+    def parse_tracert_output(self, tracert_output: str, dest_ip: str) -> str:
+        """
+        Parse the tracert output to determine if the route is fully successful or has issues.
+
+        :param tracert_output: Output of the 'tracert' command.
+        :param dest_ip: Destination IP address used in tracert.
+        :return: Status message indicating success or the problematic hop.
+        """
+        lines = tracert_output.splitlines()
+        logging.debug("Parsing 'tracert' output.")
+
+        for line in lines:
+            if '*' in line:
+                # Attempt to extract hop number
+                match = re.match(r'\s*(\d+)\s+\*', line)
+                if match:
+                    hop = match.group(1)
+                    logging.info(f"Tracert detected issue at hop {hop}.")
+                    return f"路由网络中链路节点存在问题（第{hop}跳）"
+                else:
+                    logging.info("Tracert detected issue but failed to parse hop number.")
+                    return f"路由网络中链路节点存在问题"
+        # If no '*' found
+        logging.info("Tracert indicates the route is fully successful.")
+        return "路由网络畅通"
+
+    def execute_tracert(self, tn: telnetlib.Telnet, dest_ip: str) -> Tuple[Optional[str], str]:
+        """
+        Execute the 'tracert' command to the specified destination IP and return the output and status.
+
+        :param tn: Telnet connection object.
+        :param dest_ip: Destination IP address to traceroute.
+        :return: Tuple containing the tracert output and status message.
+        """
+        try:
+            tracert_cmd = f"tracert {dest_ip}"
+            tn.write(tracert_cmd.encode('ascii') + b'\n')
+            logging.info(f"[{tn.host}:{tn.port}] Sending command: {tracert_cmd}")
+
+            tracert_output = ""
+            tracert_status = "Tracert 执行中..."
+            timeout = 60  # 增加超时时间以适应较长的 tracert 执行时间
+            start_time = time.time()
+
+            while True:
+                if time.time() - start_time > timeout:
+                    logging.warning(f"[{tn.host}:{tn.port}] Tracert command timed out.")
+                    tracert_status = "Tracert 执行超时"
+                    break
+
+                try:
+                    # 逐行读取输出，每行以 '\n' 结尾
+                    line = tn.read_until(b'\n', timeout=1).decode('ascii', errors='ignore').strip()
+                except EOFError:
+                    line = ''
+
+                if line:
+                    tracert_output += line + '\n'
+                    logging.debug(f"[{tn.host}:{tn.port}] Tracert Output: {line}")
+
+                    if '*' in line:
+                        # 检测到 '*'，发送 Ctrl+C 终止 tracert
+                        tn.write(b'\x03')
+                        logging.info(f"[{tn.host}:{tn.port}] Detected '*', sending Ctrl+C to terminate tracert.")
+                        # 等待命令中断
+                        time.sleep(2)
+                        tracert_status = self.parse_tracert_output(tracert_output, dest_ip)
+                        break
+
+                    # 检查是否已到达 tracert 结束
+                    if "Trace complete." in line or "Traceroute complete." in line:
+                        tracert_status = self.parse_tracert_output(tracert_output, dest_ip)
+                        break
+
+                # 检查是否有新的提示符出现，表示 tracert 已完成
+                prompt = self.get_prompt(tn)
+                if prompt:
+                    if tracert_status == "Tracert 执行中...":
+                        tracert_status = self.parse_tracert_output(tracert_output, dest_ip)
+                    break
+
+                time.sleep(0.5)  # 减少等待时间以提高响应速度
+
+            return tracert_output, tracert_status
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] Error executing tracert to {dest_ip}: {e}")
+            return None, "Tracert 执行失败"
+
 
     def connect_and_get_sysnames_and_configs(self):
         nodes = self.telnet_info.get("node", [])
@@ -503,12 +691,21 @@ class RouterManager:
     def collect_results(self) -> Dict[str, Any]:
         """
         Collect all results, perform interface matching, and output interface configuration status including OSPF, ISIS, and BGP statuses.
+        Additionally, consolidate all unconfigured information and provide suggestions on which nodes need protocol configuration.
         """
         # Store interface status information
         interface_status = {}
         ospf_status = {}
         isis_status = {}
         bgp_info_dict = {}
+        routing_table_info = {}
+        tracert_statuses = {}
+        recommendations = {
+            "未配置 OSPF 接口": [],
+            "未配置 ISIS 接口": [],
+            "未配置 BGP": [],
+            "接口缺少 IP 配置": []
+        }
 
         for host_port, sysname in self.telnet_sysnames.items():
             node_interfaces = self.node_interfaces.get(sysname, [])
@@ -519,6 +716,8 @@ class RouterManager:
             router_id = self.telnet_router_ids.get(host_port)
             ospf_neighbors = self.telnet_ospf_peers.get(host_port)
             bgp_info = self.telnet_bgp_info.get(host_port)
+            routing_info = self.telnet_routing_table.get(host_port)
+            tracert_info = self.telnet_tracert_output.get(host_port)
 
             # Extract interface names from Telnet and convert to lowercase for comparison
             telnet_interface_names = [iface['Interface'].lower() for iface in telnet_interfaces if isinstance(iface, dict)]
@@ -530,33 +729,40 @@ class RouterManager:
             logging.debug(f"[{host_port}] ISIS-configured interfaces: {isis_interfaces_lower}")
             if bgp_info:
                 logging.debug(f"[{host_port}] BGP info: {bgp_info}")
+            if routing_info:
+                logging.debug(f"[{host_port}] Routing table info: {routing_info}")
+            if tracert_info:
+                logging.debug(f"[{host_port}] Tracert output and status: {tracert_info}")
 
             interface_status[host_port] = []
             ospf_status[host_port] = ""
             isis_status[host_port] = ""
             bgp_info_dict[host_port] = {}
+            routing_table_info[host_port] = {}
+            tracert_statuses[host_port] = ""
 
             for iface in node_interfaces:
-                # Format interface name, e.g., type="ethernet" name="e1/0/0" => "Ethernet1/0/0"
+                # Format interface name using normalize_interface_name
                 iface_name = iface['name']
-                if iface_name.lower().startswith('e'):
-                    iface_number = iface_name[1:]  # Remove 'e' prefix
-                    iface_formatted = f"Ethernet{iface_number}"
-                else:
-                    # If interface name does not start with 'e', format as per type
-                    iface_formatted = f"{iface['type'].capitalize()}{iface['name']}"
-
+                iface_formatted = normalize_interface_name(iface_name)
                 iface_formatted_lower = iface_formatted.lower()
                 logging.debug(f"[{host_port}] Formatted interface name: {iface_formatted}")
 
                 # Determine if interface has IP configured
-                config_status = "已配置IP地址" if iface_formatted_lower in telnet_interface_names else "未配置IP地址"
+                has_ip = any(iface_info['Interface'].lower() == iface_formatted_lower for iface_info in telnet_interfaces)
+                config_status = "已配置IP地址" if has_ip else "未配置IP地址"
+                if not has_ip:
+                    recommendations["接口缺少 IP 配置"].append(f"{sysname} ({host_port}) - {iface_formatted}")
 
                 # Determine OSPF configuration status
                 ospf_iface_status = "OSPF已配置" if iface_formatted_lower in ospf_interfaces_lower else "OSPF未配置"
+                if ospf_iface_status == "OSPF未配置":
+                    recommendations["未配置 OSPF 接口"].append(f"{sysname} ({host_port}) - {iface_formatted}")
 
                 # Determine ISIS configuration status
                 isis_iface_status = "ISIS已配置" if iface_formatted_lower in isis_interfaces_lower else "ISIS未配置"
+                if isis_iface_status == "ISIS未配置":
+                    recommendations["未配置 ISIS 接口"].append(f"{sysname} ({host_port}) - {iface_formatted}")
 
                 status = f"{iface_formatted}接口配置状态: {config_status}, {ospf_iface_status}, {isis_iface_status}"
                 interface_status[host_port].append(status)
@@ -569,8 +775,12 @@ class RouterManager:
                     ospf_status[host_port] = f"OSPF 配置正常，邻居 Router IDs: {neighbors_str}"
                 else:
                     ospf_status[host_port] = "OSPF 配置问题：未检测到邻居 Router ID" if ospf_interfaces else "OSPF 未配置"
+                    if ospf_interfaces:
+                        recommendations["未配置 OSPF 接口"].append(f"{sysname} ({host_port}) - 相关接口未检测到 OSPF 邻居")
             else:
                 ospf_status[host_port] = "OSPF 配置问题：未检测到 Router ID" if ospf_interfaces else "OSPF 未配置"
+                if ospf_interfaces:
+                    recommendations["未配置 OSPF 接口"].append(f"{sysname} ({host_port}) - 未检测到 Router ID")
 
             # Determine ISIS status based on 'display isis peer' and ISIS interfaces
             if isis_peers is not None:
@@ -578,12 +788,16 @@ class RouterManager:
                     isis_status[host_port] = f"ISIS 配置正常，邻居数量: {isis_peers}"
                 elif isis_interfaces and isis_peers == 0:
                     isis_status[host_port] = "ISIS 配置问题：接口配置了 ISIS 但未检测到邻居 Router ID"
+                    recommendations["未配置 ISIS 接口"].append(f"{sysname} ({host_port}) - 接口配置了 ISIS 但未检测到邻居")
                 elif not isis_interfaces and isis_peers > 0:
                     isis_status[host_port] = "ISIS 配置问题：存在 ISIS 邻居但未配置 ISIS 接口"
+                    recommendations["未配置 ISIS 接口"].append(f"{sysname} ({host_port}) - 存在 ISIS 邻居但未配置 ISIS 接口")
                 else:
                     isis_status[host_port] = "ISIS 配置问题：未知情况"
             else:
                 isis_status[host_port] = "ISIS 配置错误：接口配置了 ISIS 但未检测到邻居 Router ID" if isis_interfaces else "ISIS 未配置"
+                if isis_interfaces:
+                    recommendations["未配置 ISIS 接口"].append(f"{sysname} ({host_port}) - 接口配置了 ISIS 但未检测到邻居 Router ID")
 
             # Extract BGP info
             if bgp_info:
@@ -600,6 +814,10 @@ class RouterManager:
                     "bgp_established_peers": bgp_established_peers,
                     "bgp_non_established_peers": bgp_non_established_peers
                 }
+
+                # 如果 BGP 未配置或没有 peers，则添加建议
+                if bgp_total_peers == 0:
+                    recommendations["未配置 BGP"].append(f"{sysname} ({host_port})")
             else:
                 bgp_info_dict[host_port] = {
                     "bgp_local_router_id": "未知",
@@ -608,6 +826,7 @@ class RouterManager:
                     "bgp_established_peers": 0,
                     "bgp_non_established_peers": []
                 }
+                recommendations["未配置 BGP"].append(f"{sysname} ({host_port})")
 
             # Log BGP status
             if bgp_info:
@@ -625,6 +844,29 @@ class RouterManager:
             else:
                 logging.info(f"[{host_port}] BGP 未配置")
 
+            # 新增：处理 routing table 信息
+            if routing_info:
+                max_cost_dest = routing_info.get("max_cost_destination", "未知")
+                routing_table_info[host_port] = {
+                    "max_cost_destination": max_cost_dest
+                }
+                logging.info(f"[{host_port}] Cost 最大的 Destination: {max_cost_dest}")
+            else:
+                routing_table_info[host_port] = {
+                    "max_cost_destination": "未知"
+                }
+                logging.info(f"[{host_port}] 未找到 Cost 最大的 Destination。")
+
+            # 新增：处理 tracert 输出和状态
+            if tracert_info:
+                tracert_output = tracert_info.get("output", "")
+                tracert_status = tracert_info.get("status", "未执行 Tracert 或 Tracert 失败。")
+                tracert_statuses[host_port] = tracert_status
+                logging.info(f"[{host_port}] Tracert 状态: {tracert_status}")
+            else:
+                tracert_statuses[host_port] = "未执行 Tracert 或 Tracert 失败。"
+                logging.info(f"[{host_port}] Tracert 未执行或失败。")
+
         return {
             "telnet_devices": {
                 host_port: {
@@ -637,11 +879,14 @@ class RouterManager:
                     "interface_status": interface_status.get(host_port, []),
                     "ospf_status": ospf_status.get(host_port, "未配置 OSPF"),
                     "isis_status": isis_status.get(host_port, "未配置 ISIS"),
-                    "bgp_info": bgp_info_dict.get(host_port, {})
+                    "bgp_info": bgp_info_dict.get(host_port, {}),
+                    "routing_table_info": routing_table_info.get(host_port, {}),
+                    "tracert_status": tracert_statuses.get(host_port, "未执行 Tracert 或 Tracert 失败。")
                 }
                 for host_port, sysname in self.telnet_sysnames.items()
             },
-            "network_connections": self.network_connections
+            "network_connections": self.network_connections,
+            "recommendations": recommendations
         }
 
     def read_unl_file(self, lab_id: int):
@@ -681,18 +926,19 @@ class RouterManager:
                     interface_name = interface.get("name")
                     interface_type = interface.get("type", "ethernet")  # Default type is ethernet
                     if network_id and node_name:
+                        normalized_iface_name = normalize_interface_name(interface_name)
                         if network_id not in network_to_interfaces:
                             network_to_interfaces[network_id] = []
                         network_to_interfaces[network_id].append({
                             "node_name": node_name,
-                            "interface_name": interface_name,
+                            "interface_name": normalized_iface_name,
                             "type": interface_type
                         })
                         # Store node interface information
                         if node_name not in self.node_interfaces:
                             self.node_interfaces[node_name] = []
                         self.node_interfaces[node_name].append({
-                            "name": interface_name,
+                            "name": normalized_iface_name,
                             "type": interface_type
                         })
 
@@ -715,6 +961,139 @@ class RouterManager:
             logging.info(f"Successfully parsed UNL file into network connections.")
         except ET.ParseError as e:
             logging.error(f"Error parsing UNL file: {e}")
+
+    def find_latest_folder(self, base_path: str) -> str:
+        try:
+            all_folders = [f for f in os.listdir(base_path) if f.isdigit()]
+            if not all_folders:
+                raise ValueError("No numbered folders found in the base path.")
+            latest_folder = max(all_folders, key=int)
+            logging.info(f"Latest folder identified: {latest_folder}")
+            return latest_folder
+        except FileNotFoundError:
+            logging.error(f"Base path not found: {base_path}")
+            sys.exit(1)
+        except ValueError as ve:
+            logging.error(ve)
+            sys.exit(1)
+
+    def load_telnet_info(self, input_path: str) -> Dict[str, Any]:
+        try:
+            with open(input_path, 'r', encoding='utf-8') as f:
+                telnet_info = json.load(f)
+            logging.info(f"Successfully loaded telnet_info from {input_path}")
+            return telnet_info
+        except FileNotFoundError:
+            logging.error(f"param.json file not found at path: {input_path}")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            logging.error(f"Error decoding JSON from param.json: {e}")
+            sys.exit(1)
+
+    def write_output(self, output_path: str, data: Dict[str, Any]):
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)  # Use ensure_ascii=False to support Chinese
+            logging.info(f"Mapping results written to {output_path}")
+        except IOError as e:
+            logging.error(f"Error writing to output file: {e}")
+            sys.exit(1)
+
+    def write_interface_status(self, data_txt_path: str, mapping: Dict[str, Any]):
+        """
+        Write interface status and OSPF/ISIS/BGP status to data.txt in the following format:
+        Node: sysname1 (host:port)
+            Interface: Ethernet1/0/0接口配置状态: 已配置IP地址, OSPF已配置, ISIS未配置
+            OSPF Status: OSPF 配置正常，邻居 Router IDs: 2.2.2.2, 1.1.1.1
+            ISIS Status: ISIS 配置正常，邻居数量: 1
+            BGP Local Router ID: 3.3.3.3
+            BGP Local AS Number: 100
+            BGP Total Peers: 3
+            BGP Established Peers: 2
+            BGP Non-Established Peers:
+                Peer IP: x.x.x.x, AS: y, State: Z
+            Cost 最大的 Destination: <IP>
+            Tracert Status: 路由网络畅通
+            Tracert Output:
+                <Tracert Output>
+
+        Recommendations:
+            - OSPF未配置接口:
+                - Router1 (192.168.1.1:23) - Ethernet1/0/0
+                - Router2 (192.168.1.2:23) - Ethernet1/0/1
+            - ISIS未配置接口:
+                - Router1 (192.168.1.1:23) - Ethernet1/0/0
+            - BGP未配置:
+                - Router3 (192.168.1.3:23)
+            - 接口缺少 IP 配置:
+                - Router4 (192.168.1.4:23) - Ethernet1/0/2
+        """
+        try:
+            with open(data_txt_path, 'w', encoding='utf-8') as f:
+                telnet_devices = mapping.get("telnet_devices", {})
+                for host_port, device_info in telnet_devices.items():
+                    sysname = device_info.get("sysname", "未知节点")
+                    interface_status_list = device_info.get("interface_status", [])
+                    ospf_status = device_info.get("ospf_status", "未配置 OSPF")
+                    isis_status = device_info.get("isis_status", "未配置 ISIS")
+                    bgp_info = device_info.get("bgp_info", {})
+                    routing_info = device_info.get("routing_table_info", {})
+                    tracert_status = device_info.get("tracert_status", "未执行 Tracert 或 Tracert 失败。")
+
+                    f.write(f"节点: {sysname} ({host_port})\n")
+                    for status in interface_status_list:
+                        f.write(f"    接口: {status}\n")
+                    f.write(f"    OSPF 状态: {ospf_status}\n")
+                    f.write(f"    ISIS 状态: {isis_status}\n")
+
+                    # Write BGP information
+                    if bgp_info and bgp_info.get("bgp_local_router_id") != "未知":
+                        f.write(f"    BGP 本地 Router ID: {bgp_info.get('bgp_local_router_id')}\n")
+                        f.write(f"    BGP 本地 AS Number: {bgp_info.get('bgp_local_as_number')}\n")
+                        f.write(f"    BGP 总邻居数量: {bgp_info.get('bgp_total_peers')}\n")
+                        f.write(f"    BGP 建立状态的邻居数量: {bgp_info.get('bgp_established_peers')}\n")
+
+                        non_established_peers = bgp_info.get("bgp_non_established_peers", [])
+                        if non_established_peers:
+                            f.write(f"    BGP 未建立状态的邻居:\n")
+                            for peer in non_established_peers:
+                                peer_ip = peer.get("peer_ip", "未知")
+                                peer_as = peer.get("peer_as", "未知")
+                                state = peer.get("state", "未知")
+                                f.write(f"        Peer IP: {peer_ip}, AS: {peer_as}, State: {state}\n")
+                        else:
+                            f.write(f"    BGP 未建立状态的邻居: 无\n")
+                    else:
+                        f.write(f"    BGP 未配置\n")
+
+                    # Write Routing Table Info
+                    max_cost_dest = routing_info.get("max_cost_destination", "未知")
+                    f.write(f"    Cost 最大的 Destination: {max_cost_dest}\n")
+
+                    # Write Tracert Status
+                    tracert_status_message = tracert_status if tracert_status else "未执行 Tracert 或 Tracert 失败。"
+                    f.write(f"    Tracert Status: {tracert_status_message}\n")
+
+                    # Write Tracert Output
+                    if tracert_status_message.startswith("路由网络中链路节点存在问题") or tracert_status_message == "路由网络畅通":
+                        f.write(f"    Tracert Output: {tracert_status_message}\n")
+                    else:
+                        f.write(f"    Tracert Output: {tracert_status_message}\n")
+
+                    f.write("\n")  # Add empty line between devices
+
+                # Write Recommendations
+                recommendations = mapping.get("recommendations", {})
+                f.write("建议:\n")
+                for category, items in recommendations.items():
+                    if items:
+                        f.write(f"    - {category}:\n")
+                        for item in items:
+                            f.write(f"        - {item}\n")
+                logging.info(f"接口状态已写入 {data_txt_path}")
+        except IOError as e:
+            logging.error(f"写入 {data_txt_path} 时出错: {e}")
+            sys.exit(1)
 
 def find_latest_folder(base_path: str) -> str:
     try:
@@ -766,12 +1145,21 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
         BGP Established Peers: 2
         BGP Non-Established Peers:
             Peer IP: x.x.x.x, AS: y, State: Z
+        Cost 最大的 Destination: <IP>
+        Tracert Status: 路由网络畅通
+        Tracert Output:
+            <Tracert Output>
 
-    Node: sysname2 (host:port)
-        Interface: Ethernet1/0/2接口配置状态: 未配置IP地址, OSPF未配置, ISIS未配置
-        OSPF Status: OSPF 未配置
-        ISIS Status: ISIS 未配置
-        BGP 未配置
+    Recommendations:
+        - OSPF未配置接口:
+            - Router1 (192.168.1.1:23) - Ethernet1/0/0
+            - Router2 (192.168.1.2:23) - Ethernet1/0/1
+        - ISIS未配置接口:
+            - Router1 (192.168.1.1:23) - Ethernet1/0/0
+        - BGP未配置:
+            - Router3 (192.168.1.3:23)
+        - 接口缺少 IP 配置:
+            - Router4 (192.168.1.4:23) - Ethernet1/0/2
     """
     try:
         with open(data_txt_path, 'w', encoding='utf-8') as f:
@@ -782,6 +1170,8 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
                 ospf_status = device_info.get("ospf_status", "未配置 OSPF")
                 isis_status = device_info.get("isis_status", "未配置 ISIS")
                 bgp_info = device_info.get("bgp_info", {})
+                routing_info = device_info.get("routing_table_info", {})
+                tracert_status = device_info.get("tracert_status", "未执行 Tracert 或 Tracert 失败。")
 
                 f.write(f"节点: {sysname} ({host_port})\n")
                 for status in interface_status_list:
@@ -809,8 +1199,31 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
                 else:
                     f.write(f"    BGP 未配置\n")
 
+                # Write Routing Table Info
+                max_cost_dest = routing_info.get("max_cost_destination", "未知")
+                f.write(f"    Cost 最大的 Destination: {max_cost_dest}\n")
+
+                # Write Tracert Status
+                tracert_status_message = tracert_status if tracert_status else "未执行 Tracert 或 Tracert 失败。"
+                f.write(f"    Tracert Status: {tracert_status_message}\n")
+
+                # Write Tracert Output
+                if tracert_status_message.startswith("路由网络中链路节点存在问题") or tracert_status_message == "路由网络畅通":
+                    f.write(f"    Tracert Output: {tracert_status_message}\n")
+                else:
+                    f.write(f"    Tracert Output: {tracert_status_message}\n")
+
                 f.write("\n")  # Add empty line between devices
-        logging.info(f"接口状态已写入 {data_txt_path}")
+
+            # Write Recommendations
+            recommendations = mapping.get("recommendations", {})
+            f.write("建议:\n")
+            for category, items in recommendations.items():
+                if items:
+                    f.write(f"    - {category}:\n")
+                    for item in items:
+                        f.write(f"        - {item}\n")
+            logging.info(f"接口状态已写入 {data_txt_path}")
     except IOError as e:
         logging.error(f"写入 {data_txt_path} 时出错: {e}")
         sys.exit(1)
@@ -852,3 +1265,6 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
     args = parser.parse_args()
     main(args.input, args.output)
+
+
+

@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import logging
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 import xml.etree.ElementTree as ET
 import re
 
@@ -182,7 +182,7 @@ class RouterManager:
             logging.warning(f"[{tn.host}:{tn.port}] No output received from Telnet commands.")
         return command_outputs
 
-    def parse_display_ospf_peer(self, output: str) -> Tuple[Optional[str], Optional[List[str]]]:
+    def parse_display_ospf_peer(self, output: str) -> (Optional[str], Optional[List[str]]):
         """
         Parse the output of 'display ospf peer' to extract the current node's Router ID and neighbor Router IDs.
 
@@ -293,11 +293,11 @@ class RouterManager:
                  established peers, and list of non-established peers. Returns None if parsing fails.
         """
         bgp_info = {
-            "bgp_local_router_id": None,
-            "bgp_local_as_number": None,
-            "bgp_total_peers": 0,
-            "bgp_established_peers": 0,
-            "bgp_non_established_peers": []
+            "local_router_id": None,
+            "local_as_number": None,
+            "total_peers": 0,
+            "established_peers": 0,
+            "non_established_peers": []
         }
 
         lines = output.splitlines()
@@ -324,17 +324,17 @@ class RouterManager:
             for key, value in key_value_matches:
                 key = key.strip().lower()
                 if key == 'bgp local router id':
-                    bgp_info["bgp_local_router_id"] = value
-                    logging.debug(f"Detected BGP local Router ID: {bgp_info['bgp_local_router_id']}")
+                    bgp_info["local_router_id"] = value
+                    logging.debug(f"Detected BGP local Router ID: {bgp_info['local_router_id']}")
                 elif key == 'local as number':
-                    bgp_info["bgp_local_as_number"] = value
-                    logging.debug(f"Detected local AS number: {bgp_info['bgp_local_as_number']}")
+                    bgp_info["local_as_number"] = value
+                    logging.debug(f"Detected local AS number: {bgp_info['local_as_number']}")
                 elif key == 'total number of peers':
-                    bgp_info["bgp_total_peers"] = int(value)
-                    logging.debug(f"Detected total BGP peers: {bgp_info['bgp_total_peers']}")
+                    bgp_info["total_peers"] = int(value)
+                    logging.debug(f"Detected total BGP peers: {bgp_info['total_peers']}")
                 elif key == 'peers in established state':
-                    bgp_info["bgp_established_peers"] = int(value)
-                    logging.debug(f"Detected established BGP peers: {bgp_info['bgp_established_peers']}")
+                    bgp_info["established_peers"] = int(value)
+                    logging.debug(f"Detected established BGP peers: {bgp_info['established_peers']}")
 
             # Identify start of peer table
             if line.strip().startswith("Peer"):
@@ -352,7 +352,7 @@ class RouterManager:
                 if match:
                     state = match.group('state').lower()
                     if state != 'established':
-                        bgp_info["bgp_non_established_peers"].append({
+                        bgp_info["non_established_peers"].append({
                             "peer_ip": match.group('peer_ip'),
                             "peer_as": match.group('peer_as'),
                             "state": match.group('state').capitalize()
@@ -362,7 +362,7 @@ class RouterManager:
                     logging.debug(f"Unmatched BGP peer line: {line}")
 
         # Check if parsing was successful
-        if bgp_info["bgp_local_router_id"] and bgp_info["bgp_local_as_number"]:
+        if bgp_info["local_router_id"] and bgp_info["local_as_number"]:
             logging.info(f"Extracted BGP info: {bgp_info}")
             return bgp_info
         else:
@@ -550,13 +550,22 @@ class RouterManager:
                 logging.debug(f"[{host_port}] Formatted interface name: {iface_formatted}")
 
                 # Determine if interface has IP configured
-                config_status = "已配置IP地址" if iface_formatted_lower in telnet_interface_names else "未配置IP地址"
+                if iface_formatted_lower in telnet_interface_names:
+                    config_status = "已配置IP地址"
+                else:
+                    config_status = "未配置IP地址"
 
                 # Determine OSPF configuration status
-                ospf_iface_status = "OSPF已配置" if iface_formatted_lower in ospf_interfaces_lower else "OSPF未配置"
+                if iface_formatted_lower in ospf_interfaces_lower:
+                    ospf_iface_status = "OSPF已配置"
+                else:
+                    ospf_iface_status = "OSPF未配置"
 
                 # Determine ISIS configuration status
-                isis_iface_status = "ISIS已配置" if iface_formatted_lower in isis_interfaces_lower else "ISIS未配置"
+                if iface_formatted_lower in isis_interfaces_lower:
+                    isis_iface_status = "ISIS已配置"
+                else:
+                    isis_iface_status = "ISIS未配置"
 
                 status = f"{iface_formatted}接口配置状态: {config_status}, {ospf_iface_status}, {isis_iface_status}"
                 interface_status[host_port].append(status)
@@ -568,9 +577,15 @@ class RouterManager:
                     neighbors_str = ', '.join(self.telnet_ospf_peers[host_port])
                     ospf_status[host_port] = f"OSPF 配置正常，邻居 Router IDs: {neighbors_str}"
                 else:
-                    ospf_status[host_port] = "OSPF 配置问题：未检测到邻居 Router ID" if ospf_interfaces else "OSPF 未配置"
+                    if ospf_interfaces:
+                        ospf_status[host_port] = "OSPF 配置问题：未检测到邻居 Router ID"
+                    else:
+                        ospf_status[host_port] = "OSPF 未配置"
             else:
-                ospf_status[host_port] = "OSPF 配置问题：未检测到 Router ID" if ospf_interfaces else "OSPF 未配置"
+                if ospf_interfaces:
+                    ospf_status[host_port] = "OSPF 配置问题：未检测到 Router ID"
+                else:
+                    ospf_status[host_port] = "OSPF 未配置"
 
             # Determine ISIS status based on 'display isis peer' and ISIS interfaces
             if isis_peers is not None:
@@ -583,15 +598,18 @@ class RouterManager:
                 else:
                     isis_status[host_port] = "ISIS 配置问题：未知情况"
             else:
-                isis_status[host_port] = "ISIS 配置错误：接口配置了 ISIS 但未检测到邻居 Router ID" if isis_interfaces else "ISIS 未配置"
+                if isis_interfaces:
+                    isis_status[host_port] = "ISIS 配置错误：接口配置了 ISIS 但未检测到邻居 Router ID"
+                else:
+                    isis_status[host_port] = "ISIS 未配置"
 
             # Extract BGP info
             if bgp_info:
-                bgp_local_router_id = bgp_info.get("bgp_local_router_id", "未知")
-                bgp_local_as_number = bgp_info.get("bgp_local_as_number", "未知")
-                bgp_total_peers = bgp_info.get("bgp_total_peers", 0)
-                bgp_established_peers = bgp_info.get("bgp_established_peers", 0)
-                bgp_non_established_peers = bgp_info.get("bgp_non_established_peers", [])
+                bgp_local_router_id = bgp_info.get("local_router_id", "未知")
+                bgp_local_as_number = bgp_info.get("local_as_number", "未知")
+                bgp_total_peers = bgp_info.get("total_peers", 0)
+                bgp_established_peers = bgp_info.get("established_peers", 0)
+                bgp_non_established_peers = bgp_info.get("non_established_peers", [])
 
                 bgp_info_dict[host_port] = {
                     "bgp_local_router_id": bgp_local_router_id,
@@ -611,13 +629,13 @@ class RouterManager:
 
             # Log BGP status
             if bgp_info:
-                if bgp_info.get("bgp_total_peers", 0) > 0:
-                    logging.info(f"[{host_port}] BGP 本地 Router ID: {bgp_info.get('bgp_local_router_id')}")
-                    logging.info(f"[{host_port}] BGP 本地 AS Number: {bgp_info.get('bgp_local_as_number')}")
-                    logging.info(f"[{host_port}] BGP 总邻居数量: {bgp_info.get('bgp_total_peers')}")
-                    logging.info(f"[{host_port}] BGP 建立状态的邻居数量: {bgp_info.get('bgp_established_peers')}")
-                    if bgp_info.get("bgp_non_established_peers"):
-                        logging.info(f"[{host_port}] BGP 未建立状态的邻居: {bgp_info.get('bgp_non_established_peers')}")
+                if bgp_info["total_peers"] > 0:
+                    logging.info(f"[{host_port}] BGP 本地 Router ID: {bgp_info['bgp_local_router_id']}")
+                    logging.info(f"[{host_port}] BGP 本地 AS Number: {bgp_info['bgp_local_as_number']}")
+                    logging.info(f"[{host_port}] BGP 总邻居数量: {bgp_info['bgp_total_peers']}")
+                    logging.info(f"[{host_port}] BGP 建立状态的邻居数量: {bgp_info['bgp_established_peers']}")
+                    if bgp_info["non_established_peers"]:
+                        logging.info(f"[{host_port}] BGP 未建立状态的邻居: {bgp_info['non_established_peers']}")
                     else:
                         logging.info(f"[{host_port}] 所有 BGP peers 均处于 Established 状态。")
                 else:

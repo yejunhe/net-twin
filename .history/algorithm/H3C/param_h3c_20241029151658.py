@@ -35,9 +35,9 @@ class RouterManager:
         self.telnet_lock = Lock()
         # Define command sequences for different device types
         self.commands_map = {
-            "huaweine40": (
+            "h3c": (
                 [
-                    'scr 0 t',
+                    'screen-length disable',
                     'display ip interface brief',
                     'display ospf interface',
                     'display ospf peer',
@@ -371,55 +371,58 @@ class RouterManager:
 
     def parse_display_ip_interface_brief(self, output: str) -> List[Dict[str, str]]:
         """
-        Parse the output of 'display ip interface brief', exclude interfaces with 'unassigned' IP, and return structured data.
+        解析 'display ip interface brief' 的输出，排除IP地址为 '--' 的接口，并返回结构化数据。
 
-        :param output: Command output.
-        :return: List of interface information dictionaries.
+        :param output: 命令输出。
+        :return: 接口信息字典的列表。
         """
         lines = output.splitlines()
         interfaces = []
         header_found = False
 
-        # Regular expression to match interface lines
+        # 更新后的正则表达式，匹配新的输出格式
         interface_regex = re.compile(
-            r'^\s*(?P<interface>\S+)\s+'
-            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|unassigned)\s+'
-            r'(?P<physical>up|down)\s+'
-            r'(?P<protocol>up|down)\s+'
-            r'(?P<vpn>\S+)'
+            r'^\s*(?P<interface>\S+)\s+'                    # Interface
+            r'(?P<physical>up|down)\s+'                     # Physical
+            r'(?P<protocol>up(?:\(\w\))?|down(?:\(\w\))?)\s+'# Protocol，可能带有附加信息如(up(s))
+            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|--)\s+' # IP address/Mask 或 --
+            r'(?P<vpn>\S+)\s+'                               # VPN instance
+            r'(?P<description>.*)$'                          # Description
         )
 
         for line in lines:
-            # Look for table header
+            # 查找表头
             if not header_found:
-                if re.match(r'^Interface\s+IP Address/Mask\s+Physical\s+Protocol\s+VPN', line):
+                if re.match(r'^Interface\s+Physical\s+Protocol\s+IP address/Mask\s+VPN instance\s+Description', line):
                     header_found = True
-                    logging.debug("Found 'display ip interface brief' table header.")
+                    logging.debug("找到 'display ip interface brief' 表头。")
                 continue
             else:
-                # Skip empty lines or separator lines
+                # 跳过空行或分隔线
                 if not line.strip() or re.match(r'^[-=]+$', line):
                     continue
 
                 match = interface_regex.match(line)
                 if match:
                     ip_address = match.group('ip_address')
-                    if ip_address.lower() != 'unassigned':
+                    if ip_address != '--':
                         interface_info = {
                             'Interface': match.group('interface'),
                             'IP Address/Mask': match.group('ip_address'),
                             'Physical': match.group('physical'),
                             'Protocol': match.group('protocol'),
-                            'VPN': match.group('vpn')
+                            'VPN': match.group('vpn'),
+                            'Description': match.group('description').strip()  # 去除描述字段的前后空白
                         }
                         interfaces.append(interface_info)
-                        logging.debug(f"Parsed interface: {interface_info}")
+                        logging.debug(f"解析的接口信息: {interface_info}")
                 else:
-                    logging.debug(f"Unmatched line in 'display ip interface brief': {line}")
+                    logging.debug(f"在 'display ip interface brief' 中未匹配的行: {line}")
                     continue
 
-        logging.debug(f"Parsed Telnet interfaces: {interfaces}")
+        logging.debug(f"解析后的 Telnet 接口列表: {interfaces}")
         return interfaces
+
 
     def parse_display_ospf_interface(self, output: str) -> List[str]:
         """
@@ -480,7 +483,7 @@ class RouterManager:
             future_to_node = {}
             for node in nodes:
                 image_type = node.get("image_type", "").lower()
-                if "huaweine40" in image_type:
+                if "h3c" in image_type:
                     host, port = node.get("hostip"), node.get("port")
                     if not host or not port:
                         logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")

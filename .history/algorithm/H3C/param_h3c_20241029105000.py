@@ -35,9 +35,9 @@ class RouterManager:
         self.telnet_lock = Lock()
         # Define command sequences for different device types
         self.commands_map = {
-            "huaweine40": (
+            "h3c": (
                 [
-                    'scr 0 t',
+                    'screen-length disable', 
                     'display ip interface brief',
                     'display ospf interface',
                     'display ospf peer',
@@ -370,6 +370,35 @@ class RouterManager:
             logging.warning("无法从 'display bgp all summary' 的输出中提取部分BGP信息。")
             return None
 
+    def connect_and_get_sysnames_and_configs(self):
+        nodes = self.telnet_info.get("node", [])
+        if not nodes:
+            logging.warning("No nodes found in telnet_info.")
+            return
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_node = {}
+            for node in nodes:
+                image_type = node.get("image_type", "").lower()
+                if "h3c" in image_type:
+                    host, port = node.get("hostip"), node.get("port")
+                    if not host or not port:
+                        logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
+                        continue
+                    try:
+                        tn = telnetlib.Telnet(host, port, timeout=10)
+                        tn.host, tn.port = host, port
+                        future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
+                        future_to_node[future] = node
+                    except Exception as e:
+                        logging.error(f"Failed to connect to {host}:{port} via Telnet: {e}")
+
+            for future in as_completed(future_to_node):
+                node = future_to_node[future]
+                host, port = node.get("hostip"), node.get("port")
+                config = future.result()
+                msg = "successful" if config else "failed"
+                logging.info(f"[{host}:{port}] Configuration retrieval {msg}.")
 
     def collect_results(self) -> Dict[str, Any]:
         """
@@ -708,36 +737,6 @@ class RouterManager:
                     logging.debug(f"Unmatched OSPF interface line: {line}")
         logging.debug(f"Parsed OSPF interfaces: {interfaces}")
         return interfaces
-
-    def connect_and_get_sysnames_and_configs(self):
-        nodes = self.telnet_info.get("node", [])
-        if not nodes:
-            logging.warning("No nodes found in telnet_info.")
-            return
-
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_node = {}
-            for node in nodes:
-                image_type = node.get("image_type", "").lower()
-                if "huaweine40" in image_type:
-                    host, port = node.get("hostip"), node.get("port")
-                    if not host or not port:
-                        logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
-                        continue
-                    try:
-                        tn = telnetlib.Telnet(host, port, timeout=10)
-                        tn.host, tn.port = host, port
-                        future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
-                        future_to_node[future] = node
-                    except Exception as e:
-                        logging.error(f"Failed to connect to {host}:{port} via Telnet: {e}")
-
-            for future in as_completed(future_to_node):
-                node = future_to_node[future]
-                host, port = node.get("hostip"), node.get("port")
-                config = future.result()
-                msg = "successful" if config else "failed"
-                logging.info(f"[{host}:{port}] Configuration retrieval {msg}.")
 
     def collect_results(self) -> Dict[str, Any]:
         """

@@ -35,9 +35,9 @@ class RouterManager:
         self.telnet_lock = Lock()
         # Define command sequences for different device types
         self.commands_map = {
-            "huaweine40": (
+            "h3c": (
                 [
-                    'scr 0 t',
+                    'screen-length disable',
                     'display ip interface brief',
                     'display ospf interface',
                     'display ospf peer',
@@ -371,104 +371,162 @@ class RouterManager:
 
     def parse_display_ip_interface_brief(self, output: str) -> List[Dict[str, str]]:
         """
-        Parse the output of 'display ip interface brief', exclude interfaces with 'unassigned' IP, and return structured data.
+        解析 'display ip interface brief' 的输出，排除IP地址为 '--' 的接口，并返回结构化数据。
 
-        :param output: Command output.
-        :return: List of interface information dictionaries.
+        :param output: 命令输出。
+        :return: 接口信息字典的列表。
         """
         lines = output.splitlines()
         interfaces = []
         header_found = False
 
-        # Regular expression to match interface lines
+        # 更新后的正则表达式，匹配新的输出格式
         interface_regex = re.compile(
-            r'^\s*(?P<interface>\S+)\s+'
-            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|unassigned)\s+'
-            r'(?P<physical>up|down)\s+'
-            r'(?P<protocol>up|down)\s+'
-            r'(?P<vpn>\S+)'
+            r'^\s*(?P<interface>\S+)\s+'                    # Interface
+            r'(?P<physical>up|down)\s+'                     # Physical
+            r'(?P<protocol>up(?:\(\w\))?|down(?:\(\w\))?)\s+'# Protocol，可能带有附加信息如(up(s))
+            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|--)\s+' # IP address/Mask 或 --
+            r'(?P<vpn>\S+)\s+'                               # VPN instance
+            r'(?P<description>.*)$'                          # Description
         )
 
         for line in lines:
-            # Look for table header
+            # 查找表头
             if not header_found:
-                if re.match(r'^Interface\s+IP Address/Mask\s+Physical\s+Protocol\s+VPN', line):
+                if re.match(r'^Interface\s+Physical\s+Protocol\s+IP address/Mask\s+VPN instance\s+Description', line):
                     header_found = True
-                    logging.debug("Found 'display ip interface brief' table header.")
+                    logging.debug("找到 'display ip interface brief' 表头。")
                 continue
             else:
-                # Skip empty lines or separator lines
+                # 跳过空行或分隔线
                 if not line.strip() or re.match(r'^[-=]+$', line):
                     continue
 
                 match = interface_regex.match(line)
                 if match:
                     ip_address = match.group('ip_address')
-                    if ip_address.lower() != 'unassigned':
+                    if ip_address != '--':
                         interface_info = {
                             'Interface': match.group('interface'),
                             'IP Address/Mask': match.group('ip_address'),
                             'Physical': match.group('physical'),
                             'Protocol': match.group('protocol'),
-                            'VPN': match.group('vpn')
+                            'VPN': match.group('vpn'),
+                            'Description': match.group('description').strip()  # 去除描述字段的前后空白
                         }
                         interfaces.append(interface_info)
-                        logging.debug(f"Parsed interface: {interface_info}")
+                        logging.debug(f"解析的接口信息: {interface_info}")
                 else:
-                    logging.debug(f"Unmatched line in 'display ip interface brief': {line}")
+                    logging.debug(f"在 'display ip interface brief' 中未匹配的行: {line}")
                     continue
 
-        logging.debug(f"Parsed Telnet interfaces: {interfaces}")
+        logging.debug(f"解析后的 Telnet 接口列表: {interfaces}")
         return interfaces
+
 
     def parse_display_ospf_interface(self, output: str) -> List[str]:
         """
-        Parse the output of 'display ospf interface' to extract OSPF-configured interfaces.
+        解析 'display ospf interface' 的输出，以提取配置了 OSPF 的接口名称。
 
-        :param output: Command output.
-        :return: List of OSPF-configured interface names in standardized format.
+        :param output: 命令输出。
+        :return: OSPF 配置的接口名称列表，格式如 'Ethernet1/0/0'。
         """
         interfaces = []
         lines = output.splitlines()
-        parsing = False  # Flag to indicate if parsing has started
+        in_interfaces_section = False
+        in_table_header = False
 
-        # Regular expression to match interface lines
-        interface_regex = re.compile(r'^\s*(?P<interface>\S+)\s+[\d\.]+')
+        # 正则表达式匹配 Area 行和 IP Address 行
+        area_regex = re.compile(r'^Area:\s+\d+\.\d+\.\d+\.\d+')
+        ip_header_regex = re.compile(r'^IP Address\s+Type\s+State\s+Cost\s+Pri\s+DR\s+BDR', re.IGNORECASE)
+        ip_entry_regex = re.compile(
+            r'^(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+'
+            r'(?P<type>\S+)\s+'
+            r'(?P<state>\S+)\s+'
+            r'(?P<cost>\d+)\s+'
+            r'(?P<pri>\d+)\s+'
+            r'(?P<dr>\d+\.\d+\.\d+\.\d+)\s+'
+            r'(?P<bdr>\d+\.\d+\.\d+\.\d+)'
+        )
+
+        # 收集 OSPF 配置的 IP 地址
+        ospf_ip_addresses = set()
 
         for line in lines:
-            if "Interfaces" in line:
-                parsing = True
-                logging.debug("Starting to parse OSPF interface information.")
+            line = line.strip()
+            if not in_interfaces_section:
+                if line.startswith("Interfaces"):
+                    in_interfaces_section = True
+                    logging.debug("进入 'Interfaces' 部分。")
                 continue
-            if parsing:
-                # Skip empty lines and separator lines
-                if not line.strip() or re.match(r'^[-=]+$', line):
+            else:
+                if area_regex.match(line):
+                    logging.debug(f"检测到 Area 行: {line}")
                     continue
-                # Match interface lines
-                match = interface_regex.match(line)
-                if match:
-                    iface = match.group('interface')
-                    logging.debug(f"Found OSPF interface: {iface}")
-                    # Format interface name
-                    if iface.lower().startswith('eth'):
-                        iface_number = iface[3:]  # Remove 'Eth' prefix
-                        iface_formatted = f"Ethernet{iface_number}"
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    elif iface.lower().startswith('loop'):
-                        # Handle Loop interfaces like Loop0
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                if ip_header_regex.match(line):
+                    in_table_header = True
+                    logging.debug("检测到 IP 地址表头。")
+                    continue
+                if in_table_header:
+                    if not line or re.match(r'^[-=]+$', line):
+                        continue  # 跳过空行和分隔线
+                    match = ip_entry_regex.match(line)
+                    if match:
+                        ip_address_full = match.group('ip_address')
+                        # 如果 IP 地址带有掩码（如10.0.38.2/24），去除掩码部分
+                        ip_address = ip_address_full.split('/')[0] if '/' in ip_address_full else ip_address_full
+                        ospf_ip_addresses.add(ip_address)
+                        logging.debug(f"提取到 OSPF 配置的 IP 地址: {ip_address}")
                     else:
-                        # Handle other interface types as needed
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                else:
-                    logging.debug(f"Unmatched OSPF interface line: {line}")
-        logging.debug(f"Parsed OSPF interfaces: {interfaces}")
+                        logging.debug(f"未匹配的 OSPF 接口行: {line}")
+
+        # 通过 IP 地址映射到接口名称
+        # self.telnet_configurations 是一个字典，键为 "host:port"，值为接口信息列表
+        for host_port, interfaces_info in self.telnet_configurations.items():
+            for iface in interfaces_info:
+                ip_mask = iface.get('IP Address/Mask', '')
+                iface_ip = ip_mask.split('/')[0] if '/' in ip_mask else ip_mask
+                if iface_ip in ospf_ip_addresses:
+                    interface_name = iface.get('Interface', '').lower()
+                    standardized_interface = self.standardize_interface_name(interface_name)
+                    if standardized_interface and standardized_interface not in interfaces:
+                        interfaces.append(standardized_interface)
+                        logging.debug(f"通过 IP 地址 {iface_ip} 映射到接口名称: {standardized_interface}")
+
+        logging.debug(f"解析后的 OSPF 接口列表: {interfaces}")
         return interfaces
+
+    def standardize_interface_name(self, interface_name: str) -> Optional[str]:
+        """
+        将接口名称标准化为统一格式，例如将 'GE1/0' 转换为 'Ethernet1/0/0'。
+
+        :param interface_name: 原始接口名称。
+        :return: 标准化后的接口名称，或 None 如果无法标准化。
+        """
+        interface_mapping = {
+            'ge': 'GigabitEthernet',
+            'GE': 'GigabitEthernet',
+            "gi": "GigabitEthernet",
+            'eth': 'Ethernet',
+            "gi1/0": "GigabitEthernet1/0",
+            'loop': 'Loopback',
+            'lo': 'Loopback',
+            # 添加其他接口类型的映射，如需要
+        }
+
+        pattern = re.compile(r'^([a-zA-Z]+)(\d+)/(\d+)$')
+        match = pattern.match(interface_name.lower())
+        if match:
+            iface_type, slot, port = match.groups()
+            standardized_type = interface_mapping.get(iface_type, iface_type.capitalize())
+            # 根据实际接口编号格式调整
+            # 假设 slot 和 port 是数字
+            standardized_name = f"{standardized_type}{slot}/{port}/0"  # 例如, Ethernet1/0/0
+            return standardized_name
+        else:
+            logging.warning(f"无法标准化的接口名称: {interface_name}")
+            return None
+
 
     def connect_and_get_sysnames_and_configs(self):
         nodes = self.telnet_info.get("node", [])
@@ -480,7 +538,7 @@ class RouterManager:
             future_to_node = {}
             for node in nodes:
                 image_type = node.get("image_type", "").lower()
-                if "huaweine40" in image_type:
+                if "h3c" in image_type:
                     host, port = node.get("hostip"), node.get("port")
                     if not host or not port:
                         logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")

@@ -18,6 +18,41 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
+def normalize_interface_name(interface_name: str) -> str:
+    """
+    标准化接口名称，将不同格式（如'e1/0/0'、'E1/0/0'、'Eth1/0/0'、'Ethernet1/0/0'、'Ethernet 1/0/0'）转换为统一格式'Ethernet1/0/0'。
+
+    :param interface_name: 原始接口名称。
+    :return: 标准化后的接口名称。
+    """
+    interface_name = interface_name.strip()
+    original_name = interface_name  # 保存原始名称用于日志
+    normalized_name = interface_name  # 默认保持原样
+
+    # 处理以 'e' 或 'E' 开头的接口名称，如 'e1/0/0' 或 'E1/0/0'
+    if re.match(r'^[eE]\d+/\d+/\d+$', interface_name):
+        iface_number = interface_name[1:]  # 移除 'e' 或 'E' 前缀
+        normalized_name = f"Ethernet{iface_number}"
+    # 处理以 'Eth' 开头的接口名称，如 'Eth1/0/0'
+    elif re.match(r'^Eth\d+/\d+/\d+$', interface_name, re.IGNORECASE):
+        iface_number = re.sub(r'^Eth', '', interface_name, flags=re.IGNORECASE)
+        normalized_name = f"Ethernet{iface_number}"
+    # 处理带有空格的 'Ethernet' 接口名称，如 'Ethernet 1/0/0'
+    elif re.match(r'^Ethernet\s*\d+/\d+/\d+$', interface_name, re.IGNORECASE):
+        # 移除 'Ethernet' 后的空格
+        iface_number = re.sub(r'^Ethernet\s*', '', interface_name, flags=re.IGNORECASE)
+        normalized_name = f"Ethernet{iface_number}"
+    # 如果已经是 'Ethernet' 开头且无空格，如 'Ethernet1/0/0'
+    elif re.match(r'^Ethernet\d+/\d+/\d+$', interface_name, re.IGNORECASE):
+        # 确保 'Ethernet' 首字母大写，其余保持不变
+        normalized_name = 'Ethernet' + interface_name[8:]
+    else:
+        # 对于其他接口类型，保持原样或根据需要进行其他处理
+        normalized_name = interface_name.capitalize()
+
+    logging.debug(f"Normalizing interface name: '{original_name}' -> '{normalized_name}'")
+    return normalized_name
+
 class RouterManager:
     def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
         self.telnet_info = telnet_info
@@ -48,6 +83,10 @@ class RouterManager:
                 b'q\n'
             )
         }
+        # Initialize NQA-related attributes
+        self.nqa_metrics: Dict[str, Dict[str, Any]] = {}
+        self.nqa_evaluations: Dict[str, Dict[str, str]] = {}
+        self.nqa_summaries: Dict[str, str] = {}
 
     def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: List[str], quit_cmd: bytes) -> Dict[str, str]:
         """
@@ -152,6 +191,8 @@ class RouterManager:
                             self.telnet_router_ids[key] = router_id
                         if neighbors is not None:
                             self.telnet_ospf_peers[key] = neighbors
+                    else:
+                        logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ospf peer' output.")
                 
                     # Parse 'display isis interface'
                     if 'display isis interface' in command_outputs:
@@ -219,45 +260,6 @@ class RouterManager:
             logging.info("No OSPF Process information found in 'display ospf peer' output.")
             return None, None
 
-    def parse_display_isis_interface(self, output: str) -> List[str]:
-        """
-        Parse the output of 'display isis interface' to extract configured ISIS interfaces.
-
-        :param output: Output of the command.
-        :return: List of ISIS-configured interface names in standardized format.
-        """
-        interfaces = []
-        lines = output.splitlines()
-        logging.debug("Parsing 'display isis interface' output.")
-        
-        # Skip header lines until the data starts
-        data_started = False
-        for line in lines:
-            if line.strip().startswith("Interface"):
-                data_started = True
-                continue
-            if not data_started:
-                continue
-            if not line.strip() or re.match(r'^[-=]+$', line):
-                continue
-            # Example line:
-            # Eth1/0/0          001         Up          Mtu:Dn/Lnk:Dn/IP:Dn 1497 L1/L2 No/No
-            parts = line.split()
-            if len(parts) < 1:
-                continue
-            iface = parts[0]
-            # Map interface name to standardized format
-            if iface.lower().startswith('eth'):
-                iface_number = iface[3:]  # Remove 'Eth' prefix
-                iface_formatted = f"Ethernet{iface_number}"
-            else:
-                iface_formatted = iface.capitalize()  # e.g., 'Loop0' stays as 'Loop0'
-            interfaces.append(iface_formatted)
-            logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
-        
-        logging.debug(f"Parsed ISIS interfaces: {interfaces}")
-        return interfaces
-
     def parse_display_isis_peer(self, output: str) -> Optional[int]:
         """
         Parse the output of 'display isis peer' to extract the total number of ISIS peers.
@@ -283,7 +285,42 @@ class RouterManager:
         else:
             logging.info("No 'Total Peer(s):' line found in 'display isis peer' output.")
             return None
+
+    def parse_display_isis_interface(self, output: str) -> List[str]:
+        """
+        Parse the output of 'display isis interface' to extract configured ISIS interfaces.
+
+        :param output: Command output.
+        :return: List of ISIS-configured interface names in standardized format.
+        """
+        interfaces = []
+        lines = output.splitlines()
+        logging.debug("Parsing 'display isis interface' output.")
         
+        # Skip header lines until the data starts
+        data_started = False
+        for line in lines:
+            if line.strip().startswith("Interface"):
+                data_started = True
+                continue
+            if not data_started:
+                continue
+            if not line.strip() or re.match(r'^[-=]+$', line):
+                continue
+            # Example line:
+            # Eth1/0/0          001         Up          Mtu:Dn/Lnk:Dn/IP:Dn 1497 L1/L2 No/No
+            parts = line.split()
+            if len(parts) < 1:
+                continue
+            iface = parts[0]
+            # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
+            iface_formatted = normalize_interface_name(iface)
+            interfaces.append(iface_formatted)
+            logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
+        
+        logging.debug(f"Parsed ISIS interfaces: {interfaces}")
+        return interfaces
+
     def parse_display_bgp_all_summary(self, output: str) -> Optional[Dict[str, Any]]:
         """
         Parse the output of 'display bgp all summary' to extract BGP information.
@@ -405,8 +442,11 @@ class RouterManager:
                 if match:
                     ip_address = match.group('ip_address')
                     if ip_address.lower() != 'unassigned':
+                        iface = match.group('interface')
+                        # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
+                        iface_formatted = normalize_interface_name(iface)
                         interface_info = {
-                            'Interface': match.group('interface'),
+                            'Interface': iface_formatted,
                             'IP Address/Mask': match.group('ip_address'),
                             'Physical': match.group('physical'),
                             'Protocol': match.group('protocol'),
@@ -444,27 +484,18 @@ class RouterManager:
                 # Skip empty lines and separator lines
                 if not line.strip() or re.match(r'^[-=]+$', line):
                     continue
+                # Skip lines that do not start with a valid interface name
+                if line.strip().startswith("Area"):
+                    continue
+
                 # Match interface lines
                 match = interface_regex.match(line)
                 if match:
                     iface = match.group('interface')
-                    logging.debug(f"Found OSPF interface: {iface}")
-                    # Format interface name
-                    if iface.lower().startswith('eth'):
-                        iface_number = iface[3:]  # Remove 'Eth' prefix
-                        iface_formatted = f"Ethernet{iface_number}"
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    elif iface.lower().startswith('loop'):
-                        # Handle Loop interfaces like Loop0
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    else:
-                        # Handle other interface types as needed
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                    # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
+                    iface_formatted = normalize_interface_name(iface)
+                    interfaces.append(iface_formatted)
+                    logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
                 else:
                     logging.debug(f"Unmatched OSPF interface line: {line}")
         logging.debug(f"Parsed OSPF interfaces: {interfaces}")
@@ -509,6 +540,9 @@ class RouterManager:
         ospf_status = {}
         isis_status = {}
         bgp_info_dict = {}
+        nqa_info_dict = {}
+        nqa_evaluation_dict = {}
+        nqa_summary_dict = {}
 
         for host_port, sysname in self.telnet_sysnames.items():
             node_interfaces = self.node_interfaces.get(sysname, [])
@@ -535,17 +569,14 @@ class RouterManager:
             ospf_status[host_port] = ""
             isis_status[host_port] = ""
             bgp_info_dict[host_port] = {}
+            nqa_info_dict[host_port] = {}
+            nqa_evaluation_dict[host_port] = {}
+            nqa_summary_dict[host_port] = ""
 
             for iface in node_interfaces:
-                # Format interface name, e.g., type="ethernet" name="e1/0/0" => "Ethernet1/0/0"
+                # Format interface name using normalize_interface_name
                 iface_name = iface['name']
-                if iface_name.lower().startswith('e'):
-                    iface_number = iface_name[1:]  # Remove 'e' prefix
-                    iface_formatted = f"Ethernet{iface_number}"
-                else:
-                    # If interface name does not start with 'e', format as per type
-                    iface_formatted = f"{iface['type'].capitalize()}{iface['name']}"
-
+                iface_formatted = normalize_interface_name(iface_name)
                 iface_formatted_lower = iface_formatted.lower()
                 logging.debug(f"[{host_port}] Formatted interface name: {iface_formatted}")
 
@@ -625,6 +656,15 @@ class RouterManager:
             else:
                 logging.info(f"[{host_port}] BGP 未配置")
 
+            # Integrate NQA results and performance evaluation if available
+            # Assuming NQA results are stored in self.nqa_metrics and evaluations in self.nqa_evaluations
+            # This part can be expanded based on how NQA data is collected and stored
+            # For now, it's left as a placeholder
+            # Example:
+            # nqa_info_dict[host_port] = self.nqa_metrics.get(host_port, {})
+            # nqa_evaluation_dict[host_port] = self.nqa_evaluations.get(host_port, {})
+            # nqa_summary_dict[host_port] = self.nqa_summaries.get(host_port, "")
+
         return {
             "telnet_devices": {
                 host_port: {
@@ -637,7 +677,10 @@ class RouterManager:
                     "interface_status": interface_status.get(host_port, []),
                     "ospf_status": ospf_status.get(host_port, "未配置 OSPF"),
                     "isis_status": isis_status.get(host_port, "未配置 ISIS"),
-                    "bgp_info": bgp_info_dict.get(host_port, {})
+                    "bgp_info": bgp_info_dict.get(host_port, {}),
+                    "nqa_info": self.nqa_metrics.get(host_port, {}),
+                    "nqa_evaluation": self.nqa_evaluations.get(host_port, {}),
+                    "nqa_summary": self.nqa_summaries.get(host_port, "")
                 }
                 for host_port, sysname in self.telnet_sysnames.items()
             },
@@ -681,18 +724,19 @@ class RouterManager:
                     interface_name = interface.get("name")
                     interface_type = interface.get("type", "ethernet")  # Default type is ethernet
                     if network_id and node_name:
+                        normalized_iface_name = normalize_interface_name(interface_name)
                         if network_id not in network_to_interfaces:
                             network_to_interfaces[network_id] = []
                         network_to_interfaces[network_id].append({
                             "node_name": node_name,
-                            "interface_name": interface_name,
+                            "interface_name": normalized_iface_name,
                             "type": interface_type
                         })
                         # Store node interface information
                         if node_name not in self.node_interfaces:
                             self.node_interfaces[node_name] = []
                         self.node_interfaces[node_name].append({
-                            "name": interface_name,
+                            "name": normalized_iface_name,
                             "type": interface_type
                         })
 
@@ -715,6 +759,396 @@ class RouterManager:
             logging.info(f"Successfully parsed UNL file into network connections.")
         except ET.ParseError as e:
             logging.error(f"Error parsing UNL file: {e}")
+
+    # NQA-related methods integrated from RouterTelnetManager
+    def get_sysname_and_routing_table(self, tn: telnetlib.Telnet) -> Tuple[Optional[str], Optional[str]]:
+        """
+        获取节点的 sysname 和 OSPF 路由表中的第一个 OSPF 路由 IP。
+        """
+        sysname = self.get_sysname_via_telnet(tn)
+        ospf_ip = None
+        if sysname:
+            try:
+                tn.write(b'scr 0 t\n')
+                time.sleep(1)
+                tn.read_very_eager()
+
+                tn.write(b'display ip routing-table\n')
+                routing_output = tn.read_until(b'>', timeout=5).decode('ascii', errors='ignore')
+                ospf_ip = self.parse_routing_table(routing_output)
+            except Exception as e:
+                logging.error(f"[{tn.host}:{tn.port}] Error retrieving routing table: {e}")
+        return sysname, ospf_ip
+
+    def parse_routing_table(self, routing_table: str) -> Optional[str]:
+        """
+        解析路由表，找到第一次出现 OSPF 的目的地址，并去掉子网掩码。
+        """
+        for line in routing_table.splitlines():
+            if 'OSPF' in line:
+                parts = line.split()
+                if parts:
+                    # 提取目的地址并去除子网掩码（如果有）
+                    dest_ip = parts[0].split('/')[0]
+                    logging.debug(f"Found OSPF route: {dest_ip}")
+                    return dest_ip
+        logging.info("No OSPF route found in routing table.")
+        return None
+
+    def perform_nqa_test(self, tn: telnetlib.Telnet, dest_ip: str, max_attempts: int = 5) -> Optional[Dict[str, Any]]:
+        """
+        配置并执行 NQA 测试，返回性能指标。
+        """
+        try:
+            # 进入 system-view 模式
+            tn.write(b'system-view\n')
+            time.sleep(1)
+            tn.read_until(b']', timeout=3)
+
+            # 配置 NQA 测试实例
+            nqa_commands = [
+                b'nqa test-instance admin perfor_test\n',
+                b'test-type icmpjitter\n',
+                f'destination-address ipv4 {dest_ip}\n'.encode('ascii'),
+                b'probe-count 2\n',
+                b'interval milliseconds 100\n',
+                b'timeout 1\n'
+            ]
+            for cmd in nqa_commands:
+                tn.write(cmd)
+                time.sleep(1)
+                tn.read_until(b']', timeout=3)
+
+            # 发送命令开始测试
+            tn.write(b'start now\n')
+            time.sleep(1)
+            tn.read_until(b']', timeout=3)
+
+            # 确保配置提交
+            tn.write(b'commit\n')
+            time.sleep(1)
+            tn.read_until(b']', timeout=3)
+
+            # 尝试获取 NQA 测试结果
+            attempt_count = 0
+            result = ""
+            while attempt_count < max_attempts:
+                tn.write(b'display nqa results test-instance admin perfor_test\n')
+                partial_output = tn.read_until(b'>', timeout=5).decode('ascii')
+                result += partial_output
+
+                if "The test is finished" in partial_output:
+                    logging.info(f"NQA test finished for {dest_ip} on attempt {attempt_count + 1}")
+                    break
+
+                attempt_count += 1
+                logging.debug(f"Attempt {attempt_count}/{max_attempts} for NQA result on {dest_ip}...")
+
+                if attempt_count >= max_attempts:
+                    logging.warning(f"Max attempts reached for {dest_ip}. Test result may be incomplete.")
+                    break
+
+            # 记录并返回结果
+            logging.debug(f"NQA Test Result for {dest_ip}:\n{result}")
+
+            # 执行结束和清理命令
+            tn.write(b'stop\n')
+            time.sleep(1)
+            tn.read_until(b']', timeout=3)
+
+            tn.write(b'q\n')
+            time.sleep(1)
+            tn.read_until(b'>', timeout=3)
+
+            tn.write(b'undo nqa test-instance admin perfor_test\n')
+            time.sleep(1)
+            tn.read_until(b']', timeout=3)
+
+            tn.write(b'commit\n')
+            time.sleep(1)
+            tn.read_until(b']', timeout=3)
+
+            # 解析并返回性能评估输入
+            metrics = self.parse_nqa_result(result)
+            if metrics is None:
+                logging.warning(f"Failed to parse NQA results for {dest_ip}.")
+            return metrics
+
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] Error during NQA test: {e}")
+            return None
+
+    def parse_nqa_result(self, nqa_result: str) -> Optional[Dict[str, Any]]:
+        """
+        解析 NQA 结果，提取性能指标。
+        """
+        metrics = {
+            "latency": None,
+            "jitter": None,
+            "packet_loss": None
+        }
+
+        # 定义每个性能指标的正则表达式
+        rtt_pattern = re.compile(r'Min/Max/Avg/Sum RTT:(\d+)/(\d+)/(\d+)/(\d+)')
+        jitter_pattern = re.compile(r'Average of Jitter:\s*(\d+(\.\d+)?)')
+        packet_loss_pattern = re.compile(r'Packet Loss Ratio:\s*(\d+(\.\d+)?)\s*%')
+
+        for line in nqa_result.splitlines():
+            line = line.strip()
+            
+            # 解析 RTT (延迟)
+            rtt_match = rtt_pattern.search(line)
+            if rtt_match:
+                try:
+                    latency_avg = float(rtt_match.group(3))  # 平均 RTT 是第3个捕获组
+                    metrics["latency"] = latency_avg
+                    logging.debug(f"Parsed latency (Avg RTT): {latency_avg} ms")
+                except ValueError as e:
+                    logging.error(f"Failed to parse latency from line: '{line}'. Error: {e}")
+                    metrics["latency"] = None
+
+            # 解析抖动 (Jitter)
+            jitter_match = jitter_pattern.search(line)
+            if jitter_match:
+                try:
+                    jitter_value = float(jitter_match.group(1))
+                    metrics["jitter"] = jitter_value
+                    logging.debug(f"Parsed jitter (Avg Jitter): {jitter_value} ms")
+                except ValueError as e:
+                    logging.error(f"Failed to parse jitter from line: '{line}'. Error: {e}")
+                    metrics["jitter"] = None
+
+            # 解析丢包率 (Packet Loss Ratio)
+            packet_loss_match = packet_loss_pattern.search(line)
+            if packet_loss_match:
+                try:
+                    packet_loss = float(packet_loss_match.group(1))
+                    metrics["packet_loss"] = packet_loss
+                    logging.debug(f"Parsed packet loss ratio: {packet_loss} %")
+                except ValueError as e:
+                    logging.error(f"Failed to parse packet loss ratio from line: '{line}'. Error: {e}")
+                    metrics["packet_loss"] = None
+
+        # 如果所有指标都无法解析，记录原始 NQA 结果以便调试
+        if all(value is None for value in metrics.values()):
+            logging.warning("All performance metrics are None. Raw NQA result:")
+            logging.warning(nqa_result)
+
+        return metrics
+
+    def evaluate_network_performance(self, metrics: Dict[str, Any]) -> Dict[str, str]:
+        """
+        根据性能指标评估网络性能，并以中文表述结果。
+        """
+        evaluation = {
+            "latency": "未知",
+            "jitter": "未知",
+            "packet_loss": "未知",
+            "overall_performance": "未知"
+        }
+
+        # 定义性能评估的阈值
+        latency_thresholds = {"good": 100, "average": 200}
+        jitter_thresholds = {"good": 50, "average": 100}
+        packet_loss_thresholds = {"good": 1, "average": 5}
+
+        # 评估延迟
+        if metrics["latency"] is not None:
+            if metrics["latency"] <= latency_thresholds["good"]:
+                evaluation["latency"] = "良好"
+            elif metrics["latency"] <= latency_thresholds["average"]:
+                evaluation["latency"] = "中等"
+            else:
+                evaluation["latency"] = "差"
+
+        # 评估抖动
+        if metrics["jitter"] is not None:
+            if metrics["jitter"] <= jitter_thresholds["good"]:
+                evaluation["jitter"] = "良好"
+            elif metrics["jitter"] <= jitter_thresholds["average"]:
+                evaluation["jitter"] = "中等"
+            else:
+                evaluation["jitter"] = "差"
+
+        # 评估丢包
+        if metrics["packet_loss"] is not None:
+            if metrics["packet_loss"] <= packet_loss_thresholds["good"]:
+                evaluation["packet_loss"] = "良好"
+            elif metrics["packet_loss"] <= packet_loss_thresholds["average"]:
+                evaluation["packet_loss"] = "中等"
+            else:
+                evaluation["packet_loss"] = "差"
+
+        # 综合评估
+        metrics_values = [evaluation["latency"], evaluation["jitter"], evaluation["packet_loss"]]
+        if all(v == "良好" for v in metrics_values):
+            evaluation["overall_performance"] = "良好"
+        elif any(v == "差" for v in metrics_values):
+            evaluation["overall_performance"] = "差"
+        elif any(v == "中等" for v in metrics_values):
+            evaluation["overall_performance"] = "中等"
+
+        return evaluation
+
+    def generate_performance_summary(self, evaluation: Dict[str, str]) -> str:
+        """
+        根据性能评估结果生成综合的网络性能评价。
+        """
+        summaries = []
+        
+        # 延迟评价
+        if evaluation["latency"] == "良好":
+            summaries.append("延迟良好")
+        elif evaluation["latency"] == "中等":
+            summaries.append("延迟中等")
+        elif evaluation["latency"] == "差":
+            summaries.append("延迟较高")
+        else:
+            summaries.append("延迟未知")
+        
+        # 抖动评价
+        if evaluation["jitter"] == "良好":
+            summaries.append("抖动小")
+        elif evaluation["jitter"] == "中等":
+            summaries.append("抖动中等")
+        elif evaluation["jitter"] == "差":
+            summaries.append("抖动较大")
+        else:
+            summaries.append("抖动未知")
+        
+        # 丢包率评价
+        if evaluation["packet_loss"] == "良好":
+            summaries.append("丢包率低")
+        elif evaluation["packet_loss"] == "中等":
+            summaries.append("丢包率中等")
+        elif evaluation["packet_loss"] == "差":
+            summaries.append("丢包率较高")
+        else:
+            summaries.append("丢包率未知")
+        
+        # 综合评估
+        if evaluation["overall_performance"] == "良好":
+            overall = "网络性能良好。"
+        elif evaluation["overall_performance"] == "中等":
+            overall = "网络性能中等。"
+        elif evaluation["overall_performance"] == "差":
+            overall = "网络性能较差。"
+        else:
+            overall = "网络性能未知。"
+        
+        # 组合所有评价
+        summary = "该设备网络性能" + "，".join(summaries) + "。" + overall
+        return summary
+
+    def process_router(self, node) -> Dict[str, Any]:
+        """
+        处理单个路由器的连接和测试，返回结果字典。
+        """
+        host = node.get("hostip")
+        port = node.get("port")
+        result_data = {
+            "host": host,
+            "port": port,
+            "sysname": None,
+            "router_id": None,
+            "ospf_ip": None,
+            "ospf_neighbors": [],
+            "isis_interfaces": [],
+            "isis_peers_count": None,
+            "bgp_info": {},
+            "interface_status": [],
+            "ospf_status": "",
+            "isis_status": "",
+            "nqa_metrics": {},
+            "nqa_evaluation": {},
+            "nqa_summary": ""
+        }
+
+        if not host or not port:
+            logging.warning(f"无效的节点配置: {node}")
+            result_data["nqa_summary"] = "无效的节点配置。"
+            return result_data
+
+        try:
+            tn = telnetlib.Telnet(host, port, timeout=10)
+            tn.host, tn.port = host, port
+            # Retrieve sysname and OSPF IP
+            sysname, ospf_ip = self.get_sysname_and_routing_table(tn)
+            if sysname:
+                result_data["sysname"] = sysname
+                key = f"{host}:{port}"
+                self.telnet_sysnames[key] = sysname
+
+                if ospf_ip:
+                    result_data["ospf_ip"] = ospf_ip
+                    # Perform NQA test
+                    nqa_metrics = self.perform_nqa_test(tn, ospf_ip)
+                    if nqa_metrics:
+                        result_data["nqa_metrics"] = nqa_metrics
+                        evaluation = self.evaluate_network_performance(nqa_metrics)
+                        summary = self.generate_performance_summary(evaluation)
+                        result_data["nqa_evaluation"] = evaluation
+                        result_data["nqa_summary"] = summary
+                        self.nqa_metrics[key] = nqa_metrics
+                        self.nqa_evaluations[key] = evaluation
+                        self.nqa_summaries[key] = summary
+            else:
+                logging.warning(f"[{host}:{port}] 无法检索 sysname。")
+        except Exception as e:
+            logging.error(f"Error processing {host}:{port} - {e}")
+            result_data["nqa_summary"] = "处理过程中发生错误。"
+
+        return result_data
+
+    def connect_and_get_sysnames_routes_and_nqa(self) -> List[Dict[str, Any]]:
+        """
+        通过 Telnet 连接每个路由器，检索 sysname、OSPF 路由，执行 NQA 测试，并评估网络性能。
+        """
+        results = []
+        nodes = self.telnet_info.get("node", [])
+        if not nodes:
+            logging.warning("没有找到任何节点配置。")
+            return results
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # 提交所有路由器的处理任务
+            future_to_node = {executor.submit(self.process_router, node): node for node in nodes}
+            for future in as_completed(future_to_node):
+                node = future_to_node[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    logging.error(f"处理节点 {node} 时发生错误: {e}")
+                    results.append({
+                        "host": node.get("hostip"),
+                        "port": node.get("port"),
+                        "sysname": None,
+                        "router_id": None,
+                        "ospf_ip": None,
+                        "ospf_neighbors": [],
+                        "isis_interfaces": [],
+                        "isis_peers_count": None,
+                        "bgp_info": {},
+                        "interface_status": [],
+                        "ospf_status": "",
+                        "isis_status": "",
+                        "nqa_metrics": {},
+                        "nqa_evaluation": {},
+                        "nqa_summary": "处理过程中发生错误。"
+                    })
+
+        return results
+
+    def collect_all_results(self) -> Dict[str, Any]:
+        """
+        收集所有结果，包括Telnet设备信息和网络连接。
+        """
+        telnet_results = self.collect_results()
+        return {
+            "telnet_devices": telnet_results.get("telnet_devices", {}),
+            "network_connections": self.network_connections
+        }
 
 def find_latest_folder(base_path: str) -> str:
     try:
@@ -755,23 +1189,32 @@ def write_output(output_path: str, data: Dict[str, Any]):
 
 def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
     """
-    Write interface status and OSPF/ISIS/BGP status to data.txt in the following format:
+    Write interface status and OSPF/ISIS/BGP/NQA status to data.txt in the following format:
     Node: sysname1 (host:port)
         Interface: Ethernet1/0/0接口配置状态: 已配置IP地址, OSPF已配置, ISIS未配置
         OSPF Status: OSPF 配置正常，邻居 Router IDs: 2.2.2.2, 1.1.1.1
         ISIS Status: ISIS 配置正常，邻居数量: 1
-        BGP Local Router ID: 3.3.3.3
-        BGP Local AS Number: 100
-        BGP Total Peers: 3
-        BGP Established Peers: 2
-        BGP Non-Established Peers:
+        BGP 本地 Router ID: 3.3.3.3
+        BGP 本地 AS Number: 100
+        BGP 总邻居数量: 3
+        BGP 建立状态的邻居数量: 2
+        BGP 未建立状态的邻居:
             Peer IP: x.x.x.x, AS: y, State: Z
+        NQA Latency: 50 ms
+        NQA Jitter: 10 ms
+        NQA Packet Loss: 0 %
+        NQA Performance Evaluation:
+            延迟: 良好
+            抖动: 良好
+            丢包率: 良好
+        NQA Performance Summary: 该设备网络性能延迟良好，抖动小，丢包率低。网络性能良好。
 
     Node: sysname2 (host:port)
         Interface: Ethernet1/0/2接口配置状态: 未配置IP地址, OSPF未配置, ISIS未配置
         OSPF Status: OSPF 未配置
         ISIS Status: ISIS 未配置
         BGP 未配置
+        NQA 未执行
     """
     try:
         with open(data_txt_path, 'w', encoding='utf-8') as f:
@@ -782,6 +1225,9 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
                 ospf_status = device_info.get("ospf_status", "未配置 OSPF")
                 isis_status = device_info.get("isis_status", "未配置 ISIS")
                 bgp_info = device_info.get("bgp_info", {})
+                nqa_metrics = device_info.get("nqa_metrics", {})
+                nqa_evaluation = device_info.get("nqa_evaluation", {})
+                nqa_summary = device_info.get("nqa_summary", "NQA 未执行")
 
                 f.write(f"节点: {sysname} ({host_port})\n")
                 for status in interface_status_list:
@@ -809,13 +1255,30 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
                 else:
                     f.write(f"    BGP 未配置\n")
 
+                # Write NQA information
+                if nqa_metrics:
+                    latency = nqa_metrics.get("latency", "未知")
+                    jitter = nqa_metrics.get("jitter", "未知")
+                    packet_loss = nqa_metrics.get("packet_loss", "未知")
+                    f.write(f"    NQA 延迟: {latency if latency != '未知' else '未知'} ms\n")
+                    f.write(f"    NQA 抖动: {jitter if jitter != '未知' else '未知'} ms\n")
+                    f.write(f"    NQA 丢包率: {packet_loss if packet_loss != '未知' else '未知'} %\n")
+                    if nqa_evaluation:
+                        f.write(f"    NQA 性能评估:\n")
+                        f.write(f"        延迟: {nqa_evaluation.get('latency', '未知')}\n")
+                        f.write(f"        抖动: {nqa_evaluation.get('jitter', '未知')}\n")
+                        f.write(f"        丢包率: {nqa_evaluation.get('packet_loss', '未知')}\n")
+                    f.write(f"    NQA 性能总结: {nqa_summary}\n")
+                else:
+                    f.write(f"    NQA 未执行\n")
+
                 f.write("\n")  # Add empty line between devices
         logging.info(f"接口状态已写入 {data_txt_path}")
     except IOError as e:
         logging.error(f"写入 {data_txt_path} 时出错: {e}")
         sys.exit(1)
 
-def main(input_path: str, output_path: str):
+def main(input_path: str, output_path: str, max_threads: int = 20):
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
         latest_folder = find_latest_folder(base_path)
@@ -825,7 +1288,7 @@ def main(input_path: str, output_path: str):
         logging.debug(f"Resolved output_path: {output_path}")
 
     telnet_info = load_telnet_info(input_path)
-    router_manager = RouterManager(telnet_info)
+    router_manager = RouterManager(telnet_info, max_workers=max_threads)
 
     # Read UNL file based on labId
     lab_id = telnet_info.get("labId")
@@ -834,8 +1297,14 @@ def main(input_path: str, output_path: str):
     else:
         logging.warning("labId not found in telnet_info.")
 
+    # Connect via Telnet and retrieve configurations
     router_manager.connect_and_get_sysnames_and_configs()
-    mapping = router_manager.collect_results()
+
+    # Perform additional NQA tests and collect results
+    # (Assuming NQA is already integrated into the connect_and_get_sysnames_and_configs method)
+
+    # Collect all results
+    mapping = router_manager.collect_all_results()
 
     logging.info("Collected router configurations:")
     logging.info(json.dumps(mapping, indent=4, ensure_ascii=False))
@@ -847,8 +1316,9 @@ def main(input_path: str, output_path: str):
     write_interface_status(data_txt_path, mapping)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process router configurations from param.json.")
+    parser = argparse.ArgumentParser(description="Process router configurations from param.json and perform NQA tests.")
     parser.add_argument("-i", "--input", required=True, help="Path to param.json, use {t} for latest folder number.")
     parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
+    parser.add_argument("--max-threads", type=int, default=20, help="最大并发线程数（默认为 20）。")
     args = parser.parse_args()
-    main(args.input, args.output)
+    main(args.input, args.output, max_threads=args.max_threads)

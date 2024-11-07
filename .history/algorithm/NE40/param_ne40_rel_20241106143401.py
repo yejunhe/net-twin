@@ -223,7 +223,7 @@ class RouterManager:
         """
         Parse the output of 'display isis interface' to extract configured ISIS interfaces.
 
-        :param output: Output of the command.
+        :param output: Command output.
         :return: List of ISIS-configured interface names in standardized format.
         """
         interfaces = []
@@ -246,12 +246,8 @@ class RouterManager:
             if len(parts) < 1:
                 continue
             iface = parts[0]
-            # Map interface name to standardized format
-            if iface.lower().startswith('eth'):
-                iface_number = iface[3:]  # Remove 'Eth' prefix
-                iface_formatted = f"Ethernet{iface_number}"
-            else:
-                iface_formatted = iface.capitalize()  # e.g., 'Loop0' stays as 'Loop0'
+            # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0'
+            iface_formatted = normalize_interface_name(iface)
             interfaces.append(iface_formatted)
             logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
         
@@ -405,8 +401,11 @@ class RouterManager:
                 if match:
                     ip_address = match.group('ip_address')
                     if ip_address.lower() != 'unassigned':
+                        iface = match.group('interface')
+                        # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0'
+                        iface_formatted = normalize_interface_name(iface)
                         interface_info = {
-                            'Interface': match.group('interface'),
+                            'Interface': iface_formatted,
                             'IP Address/Mask': match.group('ip_address'),
                             'Physical': match.group('physical'),
                             'Protocol': match.group('protocol'),
@@ -444,27 +443,15 @@ class RouterManager:
                 # Skip empty lines and separator lines
                 if not line.strip() or re.match(r'^[-=]+$', line):
                     continue
+
                 # Match interface lines
                 match = interface_regex.match(line)
                 if match:
                     iface = match.group('interface')
-                    logging.debug(f"Found OSPF interface: {iface}")
-                    # Format interface name
-                    if iface.lower().startswith('eth'):
-                        iface_number = iface[3:]  # Remove 'Eth' prefix
-                        iface_formatted = f"Ethernet{iface_number}"
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    elif iface.lower().startswith('loop'):
-                        # Handle Loop interfaces like Loop0
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    else:
-                        # Handle other interface types as needed
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                    # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0'
+                    iface_formatted = normalize_interface_name(iface)
+                    interfaces.append(iface_formatted)
+                    logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
                 else:
                     logging.debug(f"Unmatched OSPF interface line: {line}")
         logging.debug(f"Parsed OSPF interfaces: {interfaces}")
@@ -716,6 +703,26 @@ class RouterManager:
         except ET.ParseError as e:
             logging.error(f"Error parsing UNL file: {e}")
 
+def normalize_interface_name(interface_name: str) -> str:
+    """
+    标准化接口名称，将不同格式（如'e1/0/0'和'Ethernet1/0/0'）转换为统一格式'Ethernet1/0/0'。
+
+    :param interface_name: 原始接口名称。
+    :return: 标准化后的接口名称。
+    """
+    interface_name = interface_name.strip()
+    # 处理以'e'或'E'开头的接口名称，如'e1/0/0'或'E1/0/0'
+    if re.match(r'^[eE]\d+/\d+/\d+$', interface_name):
+        iface_number = interface_name[1:]  # 移除'e'或'E'前缀
+        return f"Ethernet{iface_number}"
+    # 如果已经是'Ethernet'开头，则直接返回大写的'Ethernet'
+    elif re.match(r'^Ethernet\d+/\d+/\d+$', interface_name, re.IGNORECASE):
+        # 确保'Ethernet'首字母大写，其余保持不变
+        return 'Ethernet' + interface_name[8:]
+    else:
+        # 对于其他接口类型，保持原样或根据需要进行其他处理
+        return interface_name.capitalize()
+    
 def find_latest_folder(base_path: str) -> str:
     try:
         all_folders = [f for f in os.listdir(base_path) if f.isdigit()]

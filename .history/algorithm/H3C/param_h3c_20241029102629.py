@@ -371,6 +371,39 @@ class RouterManager:
             return None
 
 
+
+
+
+    def connect_and_get_sysnames_and_configs(self):
+        nodes = self.telnet_info.get("node", [])
+        if not nodes:
+            logging.warning("No nodes found in telnet_info.")
+            return
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_node = {}
+            for node in nodes:
+                image_type = node.get("image_type", "").lower()
+                if "huaweine40" in image_type:
+                    host, port = node.get("hostip"), node.get("port")
+                    if not host or not port:
+                        logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
+                        continue
+                    try:
+                        tn = telnetlib.Telnet(host, port, timeout=10)
+                        tn.host, tn.port = host, port
+                        future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
+                        future_to_node[future] = node
+                    except Exception as e:
+                        logging.error(f"Failed to connect to {host}:{port} via Telnet: {e}")
+
+            for future in as_completed(future_to_node):
+                node = future_to_node[future]
+                host, port = node.get("hostip"), node.get("port")
+                config = future.result()
+                msg = "successful" if config else "failed"
+                logging.info(f"[{host}:{port}] Configuration retrieval {msg}.")
+
     def collect_results(self) -> Dict[str, Any]:
         """
         收集所有结果，进行接口匹配，并输出包括OSPF、ISIS和BGP状态的接口配置信息。

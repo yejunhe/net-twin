@@ -65,18 +65,22 @@ class RouterTelnetManager:
         except Exception as e:
             print(f"Error connecting to {host}:{port} - {e}")
             return None, None, None
-
+        
     def parse_routing_table(self, routing_table):
-        """解析路由表，找到第一次出现 OSPF 的目的地址，并去掉子网掩码"""
+        """解析路由表，找到第一次出现指定协议（OSPF，IBGP，ISIS-L1，ISIS-L2，EBGP）的目的地址，并去掉子网掩码"""
+        # 定义需要查找的协议列表
+        protocols = ['OSPF', 'IBGP', 'ISIS-L1', 'ISIS-L2', 'EBGP']
+        
         for line in routing_table.splitlines():
-            if 'OSPF' in line:
-                parts = line.split()
-                if parts:
-                    # 提取目的地址并去除子网掩码（如果有）
-                    dest_ip = parts[0].split('/')[0]
-                    print(f"Found OSPF route: {dest_ip}")
-                    return dest_ip
-        print("No OSPF route found")
+            for protocol in protocols:
+                if protocol in line:
+                    parts = line.split()
+                    if parts:
+                        # 提取目的地址并去除子网掩码（如果有）
+                        dest_ip = parts[0].split('/')[0]
+                        print(f"找到协议 {protocol} 对应的路由: {dest_ip}")
+                        return dest_ip
+        print("未找到指定协议的路由")
         return None
 
     def perform_nqa_test(self, tn, dest_ip, max_attempts=5):

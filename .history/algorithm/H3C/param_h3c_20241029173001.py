@@ -35,15 +35,15 @@ class RouterManager:
         self.telnet_lock = Lock()
         # Define command sequences for different device types
         self.commands_map = {
-            "huaweine40": (
+            "h3c": (
                 [
-                    'scr 0 t',
+                    'screen-length disable',
                     'display ip interface brief',
                     'display ospf interface',
                     'display ospf peer',
                     'display isis interface',
                     'display isis peer',
-                    'display bgp all summary'
+                    'display bgp peer ipv4'  # 新命令
                 ],
                 b'q\n'
             )
@@ -136,14 +136,14 @@ class RouterManager:
                         self.telnet_configurations[key] = parsed_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ip interface brief' output.")
-                
+
                     # Parse 'display ospf interface'
                     if 'display ospf interface' in command_outputs:
                         ospf_interfaces = self.parse_display_ospf_interface(command_outputs['display ospf interface'])
                         self.telnet_ospf_interfaces[key] = ospf_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display ospf interface' output.")
-                
+
                     # Parse 'display ospf peer'
                     if 'display ospf peer' in command_outputs:
                         ospf_peer_output = command_outputs['display ospf peer']
@@ -152,7 +152,7 @@ class RouterManager:
                             self.telnet_router_ids[key] = router_id
                         if neighbors is not None:
                             self.telnet_ospf_peers[key] = neighbors
-                
+
                     # Parse 'display isis interface'
                     if 'display isis interface' in command_outputs:
                         isis_output = command_outputs['display isis interface']
@@ -160,315 +160,409 @@ class RouterManager:
                         self.telnet_isis_interfaces[key] = isis_interfaces
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display isis interface' output.")
-                
+
                     # Parse 'display isis peer'
                     if 'display isis peer' in command_outputs:
                         isis_peer_output = command_outputs['display isis peer']
-                        isis_peers = self.parse_display_isis_peer(isis_peer_output)
-                        if isis_peers is not None:
-                            self.telnet_isis_peers_count[key] = isis_peers
+                        isis_peers_info = self.parse_display_isis_peer(isis_peer_output)
+                        if isis_peers_info:
+                            self.telnet_isis_peers_count[key] = len(isis_peers_info.get('peers', []))
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display isis peer' output.")
-                
-                    # Parse 'display bgp all summary'
-                    if 'display bgp all summary' in command_outputs:
-                        bgp_output = command_outputs['display bgp all summary']
-                        bgp_info = self.parse_display_bgp_all_summary(bgp_output)
+
+                    # Parse 'display bgp peer ipv4'
+                    if 'display bgp peer ipv4' in command_outputs:
+                        bgp_output = command_outputs['display bgp peer ipv4']
+                        bgp_info = self.parse_display_bgp_peer_ipv4(bgp_output)
                         if bgp_info:
                             self.telnet_bgp_info[key] = bgp_info
                     else:
-                        logging.warning(f"[{tn.host}:{tn.port}] Missing 'display bgp all summary' output.")
+                        logging.warning(f"[{tn.host}:{tn.port}] Missing 'display bgp peer ipv4' output.")
         else:
             logging.warning(f"[{tn.host}:{tn.port}] No output received from Telnet commands.")
         return command_outputs
 
     def parse_display_ospf_peer(self, output: str) -> Tuple[Optional[str], Optional[List[str]]]:
         """
-        Parse the output of 'display ospf peer' to extract the current node's Router ID and neighbor Router IDs.
+        解析 'display ospf peer' 的输出，以提取本地 Router ID 和邻居 Router IDs。
 
-        :param output: Output of the command.
-        :return: Tuple containing Router ID and list of neighbor Router IDs. Returns (None, None) if no relevant output.
+        :param output: 命令输出。
+        :return: 元组 (本地 Router ID, 邻居 Router IDs 列表)。如果无法解析，返回 (None, None)。
         """
         router_id = None
         neighbors = []
         lines = output.splitlines()
-        logging.debug(f"Parsing 'display ospf peer' output.")
+        logging.debug("解析 'display ospf peer' 输出。")
+
+        # 正则表达式匹配本地 Router ID
         ospf_process_regex = re.compile(r'OSPF Process \d+ with Router ID (\d+\.\d+\.\d+\.\d+)')
-        router_id_found = False
+        # 正则表达式匹配表格标题
+        table_header_regex = re.compile(r'^Router ID\s+Address\s+Pri\s+Dead-Time\s+State\s+Interface', re.IGNORECASE)
+        # 正则表达式匹配表格行
+        table_row_regex = re.compile(
+            r'^(?P<router_id>\d+\.\d+\.\d+\.\d+)\s+'      # Router ID
+            r'(?P<address>\d+\.\d+\.\d+\.\d+)\s+'        # Address
+            r'(?P<pri>\d+)\s+'                           # Pri
+            r'(?P<dead_time>\d+)\s+'                     # Dead-Time
+            r'(?P<state>\S+/\S+)\s+'                     # State
+            r'(?P<interface>\S+)'                        # Interface
+        )
+
+        in_table = False  # 标志是否进入表格部分
 
         for line in lines:
-            ospf_process_match = ospf_process_regex.search(line)
-            if ospf_process_match:
-                router_id = ospf_process_match.group(1)
-                router_id_found = True
-                logging.debug(f"Detected Router ID: {router_id}")
+            line = line.strip()
+            if not line:
+                continue  # 跳过空行
+
+            # 提取本地 Router ID
+            if not router_id:
+                match = ospf_process_regex.search(line)
+                if match:
+                    router_id = match.group(1)
+                    logging.debug(f"检测到本地 Router ID: {router_id}")
                 continue
 
-            if router_id_found:
-                neighbor_regex = re.compile(r'Router ID:\s+(\d+\.\d+\.\d+\.\d+)')
-                neighbor_match = neighbor_regex.search(line)
-                if neighbor_match:
-                    neighbor_id = neighbor_match.group(1)
-                    neighbors.append(neighbor_id)
-                    logging.debug(f"Detected Neighbor Router ID: {neighbor_id}")
+            # 检测表格标题，开始解析表格行
+            if table_header_regex.match(line):
+                in_table = True
+                logging.debug("检测到邻居信息表格标题，开始解析表格行。")
+                continue
 
-        if router_id_found:
-            logging.info(f"Extracted Router ID: {router_id} with Neighbors: {neighbors}")
+            # 如果处于表格解析状态，尝试解析表格行
+            if in_table:
+                match = table_row_regex.match(line)
+                if match:
+                    neighbor_router_id = match.group('router_id')
+                    neighbors.append(neighbor_router_id)
+                    logging.debug(f"检测到邻居 Router ID: {neighbor_router_id}")
+                else:
+                    logging.debug(f"未匹配的表格行: {line}")
+
+        if router_id:
+            logging.info(f"提取到本地 Router ID: {router_id} 和邻居 Router IDs: {neighbors}")
             return router_id, neighbors
         else:
-            logging.info("No OSPF Process information found in 'display ospf peer' output.")
+            logging.warning("未能提取到本地 Router ID。")
             return None, None
 
     def parse_display_isis_interface(self, output: str) -> List[str]:
         """
-        Parse the output of 'display isis interface' to extract configured ISIS interfaces.
+        解析 'display isis interface' 的输出，以提取配置了 ISIS 的接口名称。
 
-        :param output: Output of the command.
-        :return: List of ISIS-configured interface names in standardized format.
+        :param output: 命令输出。
+        :return: ISIS 配置的接口名称列表，格式如 'GigabitEthernet1/0'。
         """
         interfaces = []
         lines = output.splitlines()
-        logging.debug("Parsing 'display isis interface' output.")
-        
-        # Skip header lines until the data starts
-        data_started = False
+        current_interface = None
+        in_interface_block = False
+
+        # 正则表达式匹配接口名称行
+        interface_regex = re.compile(r'^Interface:\s+(?P<interface>\S+)', re.IGNORECASE)
+
+        # 遍历每一行，查找接口名称
         for line in lines:
-            if line.strip().startswith("Interface"):
-                data_started = True
+            line = line.strip()
+            if not line:
+                continue  # 跳过空行
+
+            # 检测接口名称行
+            match = interface_regex.match(line)
+            if match:
+                current_interface = match.group('interface')
+                in_interface_block = True
+                logging.debug(f"检测到接口: {current_interface}")
                 continue
-            if not data_started:
-                continue
-            if not line.strip() or re.match(r'^[-=]+$', line):
-                continue
-            # Example line:
-            # Eth1/0/0          001         Up          Mtu:Dn/Lnk:Dn/IP:Dn 1497 L1/L2 No/No
-            parts = line.split()
-            if len(parts) < 1:
-                continue
-            iface = parts[0]
-            # Map interface name to standardized format
-            if iface.lower().startswith('eth'):
-                iface_number = iface[3:]  # Remove 'Eth' prefix
-                iface_formatted = f"Ethernet{iface_number}"
-            else:
-                iface_formatted = iface.capitalize()  # e.g., 'Loop0' stays as 'Loop0'
-            interfaces.append(iface_formatted)
-            logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
-        
-        logging.debug(f"Parsed ISIS interfaces: {interfaces}")
+
+            # 如果在接口块中，解析接口状态
+            if in_interface_block and current_interface:
+                # 假设接口状态在 'IPv4 state' 列，可以根据实际需要调整
+                # 例如，检查 'IPv4 state' 是否为 'Up'
+                # 解析当前接口的状态信息
+                state_line = line
+                state_parts = state_line.split()
+                if len(state_parts) >= 3:
+                    ipv4_state = state_parts[1]
+                    # 仅当 IPv4 state 为 'Up' 时，认为接口已配置 ISIS
+                    if ipv4_state.lower() == 'up':
+                        standardized_interface = self.standardize_interface_name(current_interface)
+                        if standardized_interface and standardized_interface not in interfaces:
+                            interfaces.append(standardized_interface)
+                            logging.debug(f"接口 {current_interface} 标准化为 {standardized_interface} 并添加到列表。")
+                    else:
+                        logging.debug(f"接口 {current_interface} 的 IPv4 state 为 '{ipv4_state}'，未添加到列表。")
+                # 结束当前接口块的解析
+                in_interface_block = False
+                current_interface = None
+
+        logging.debug(f"解析后的 ISIS 接口列表: {interfaces}")
         return interfaces
 
-    def parse_display_isis_peer(self, output: str) -> Optional[int]:
+    def parse_display_bgp_peer_ipv4(self, output: str) -> Dict[str, Any]:
         """
-        Parse the output of 'display isis peer' to extract the total number of ISIS peers.
+        解析 'display bgp peer ipv4' 的输出，以提取本地 BGP 信息和邻居信息。
 
-        :param output: Output of the command.
-        :return: Number of peers as integer. Returns None if unable to parse.
-        """
-        total_peers = None
-        lines = output.splitlines()
-        logging.debug("Parsing 'display isis peer' output.")
-        total_peers_regex = re.compile(r'^Total Peer\(s\):\s+(\d+)', re.IGNORECASE)
-
-        for line in lines:
-            match = total_peers_regex.search(line)
-            if match:
-                total_peers = int(match.group(1))
-                logging.debug(f"Detected total ISIS peers: {total_peers}")
-                break
-
-        if total_peers is not None:
-            logging.info(f"Extracted total ISIS peers: {total_peers}")
-            return total_peers
-        else:
-            logging.info("No 'Total Peer(s):' line found in 'display isis peer' output.")
-            return None
-        
-    def parse_display_bgp_all_summary(self, output: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse the output of 'display bgp all summary' to extract BGP information.
-
-        :param output: Command output.
-        :return: Dictionary containing BGP local Router ID, local AS number, total peers,
-                 established peers, and list of non-established peers. Returns None if parsing fails.
+        :param output: 命令输出。
+        :return: 包含本地 BGP 信息和邻居信息的字典。如果无法解析，返回空字典。
         """
         bgp_info = {
-            "bgp_local_router_id": None,
-            "bgp_local_as_number": None,
-            "bgp_total_peers": 0,
-            "bgp_established_peers": 0,
-            "bgp_non_established_peers": []
+            'bgp_local_router_id': None,
+            'bgp_local_as_number': None,
+            'bgp_total_peers': 0,
+            'bgp_established_peers': 0,
+            'peers': []
         }
-
         lines = output.splitlines()
-        logging.debug("Parsing 'display bgp all summary' output.")
+        logging.debug("解析 'display bgp peer ipv4' 输出。")
 
-        # Define regex patterns
-        key_value_regex = re.compile(r'(\w+(?:\s+\w+)*)\s*:\s*(\d+)', re.IGNORECASE)
-        # Define neighbor entry regex
+        # 正则表达式匹配本地 BGP 信息
+        local_router_id_regex = re.compile(r'^BGP local router ID:\s+(\d+\.\d+\.\d+\.\d+)', re.IGNORECASE)
+        local_as_number_regex = re.compile(r'^Local AS number:\s+(\d+)', re.IGNORECASE)
+        total_peers_regex = re.compile(r'^Total number of peers:\s+(\d+)\s+Peers in established state:\s+(\d+)', re.IGNORECASE)
+        
+        # 正则表达式匹配表格行
+        # 处理可能有 '*' 前缀的 Peer 行
         peer_entry_regex = re.compile(
-            r'^(?P<peer_ip>\S+)\s+'
-            r'(?P<peer_as>\d+)\s+'
-            r'(?P<msg_rcvd>\d+)\s+'
-            r'(?P<msg_sent>\d+)\s+'
-            r'(?P<out_q>\d+)\s+'
-            r'(?P<up_down>\S+)\s+'
-            r'(?P<state>\S+)', re.IGNORECASE
+            r'^(?:\*\s*)?(?P<peer_ip>\d+\.\d+\.\d+\.\d+)\s+'   # Peer IP，可能带有 '*' 前缀
+            r'(?P<as_number>\d+)\s+'                         # AS
+            r'(?P<msg_rcvd>\d+)\s+'                          # MsgRcvd
+            r'(?P<msg_sent>\d+)\s+'                          # MsgSent
+            r'(?P<out_q>\d+)\s+'                             # OutQ
+            r'(?P<pref_rcv>\d+)\s+'                          # PrefRcv
+            r'(?P<up_down>\S+)\s+'                           # Up/Down
+            r'(?P<state>\S+)'                                # State
         )
 
-        in_peer_table = False  # Flag to indicate if parsing is in peer table
+        in_peer_table = False  # 标志是否进入 Peer 信息表格
 
         for line in lines:
-            # Extract key-value pairs
-            key_value_matches = key_value_regex.findall(line)
-            for key, value in key_value_matches:
-                key = key.strip().lower()
-                if key == 'bgp local router id':
-                    bgp_info["bgp_local_router_id"] = value
-                    logging.debug(f"Detected BGP local Router ID: {bgp_info['bgp_local_router_id']}")
-                elif key == 'local as number':
-                    bgp_info["bgp_local_as_number"] = value
-                    logging.debug(f"Detected local AS number: {bgp_info['bgp_local_as_number']}")
-                elif key == 'total number of peers':
-                    bgp_info["bgp_total_peers"] = int(value)
-                    logging.debug(f"Detected total BGP peers: {bgp_info['bgp_total_peers']}")
-                elif key == 'peers in established state':
-                    bgp_info["bgp_established_peers"] = int(value)
-                    logging.debug(f"Detected established BGP peers: {bgp_info['bgp_established_peers']}")
+            line = line.strip()
+            if not line:
+                continue  # 跳过空行
 
-            # Identify start of peer table
-            if line.strip().startswith("Peer"):
-                in_peer_table = True
+            # 提取本地 BGP 信息
+            if bgp_info['bgp_local_router_id'] is None:
+                match = local_router_id_regex.match(line)
+                if match:
+                    bgp_info['bgp_local_router_id'] = match.group(1)
+                    logging.debug(f"检测到本地 BGP Router ID: {bgp_info['bgp_local_router_id']}")
                 continue
 
-            if in_peer_table:
-                # Identify end of peer table
-                if re.match(r'^[-=]+$', line.strip()):
-                    in_peer_table = False
-                    continue
-
-                # Parse peer entries
-                match = peer_entry_regex.match(line.strip())
+            if bgp_info['bgp_local_as_number'] is None:
+                match = local_as_number_regex.match(line)
                 if match:
-                    state = match.group('state').lower()
-                    if state != 'established':
-                        bgp_info["bgp_non_established_peers"].append({
-                            "peer_ip": match.group('peer_ip'),
-                            "peer_as": match.group('peer_as'),
-                            "state": match.group('state').capitalize()
-                        })
-                        logging.debug(f"Detected non-established BGP peer: IP={match.group('peer_ip')}, AS={match.group('peer_as')}, State={match.group('state').capitalize()}")
-                else:
-                    logging.debug(f"Unmatched BGP peer line: {line}")
+                    bgp_info['bgp_local_as_number'] = int(match.group(1))
+                    logging.debug(f"检测到本地 BGP AS Number: {bgp_info['bgp_local_as_number']}")
+                continue
 
-        # Check if parsing was successful
-        if bgp_info["bgp_local_router_id"] and bgp_info["bgp_local_as_number"]:
-            logging.info(f"Extracted BGP info: {bgp_info}")
+            if bgp_info['bgp_total_peers'] == 0 and bgp_info['bgp_established_peers'] == 0:
+                match = total_peers_regex.match(line)
+                if match:
+                    bgp_info['bgp_total_peers'] = int(match.group(1))
+                    bgp_info['bgp_established_peers'] = int(match.group(2))
+                    logging.debug(f"检测到总 Peer 数量: {bgp_info['bgp_total_peers']}，建立状态的 Peer 数量: {bgp_info['bgp_established_peers']}")
+                continue
+
+            # 检测表格标题
+            if re.match(r'^Peer\s+AS\s+MsgRcvd\s+MsgSent\s+OutQ\s+PrefRcv\s+Up/Down\s+State', line, re.IGNORECASE):
+                in_peer_table = True
+                logging.debug("检测到 Peer 信息表格标题，开始解析 Peer 信息。")
+                continue
+
+            # 如果处于 Peer 信息表格中，解析每一行 Peer 信息
+            if in_peer_table:
+                match = peer_entry_regex.match(line)
+                if match:
+                    peer = {
+                        'peer_ip': match.group('peer_ip'),
+                        'as_number': int(match.group('as_number')),
+                        'msg_rcvd': int(match.group('msg_rcvd')),
+                        'msg_sent': int(match.group('msg_sent')),
+                        'out_q': int(match.group('out_q')),
+                        'pref_rcv': int(match.group('pref_rcv')),
+                        'up_down': match.group('up_down'),
+                        'state': match.group('state')
+                    }
+                    bgp_info['peers'].append(peer)
+                    logging.debug(f"检测到 Peer 信息: {peer}")
+                else:
+                    logging.debug(f"未匹配的 Peer 行: {line}")
+
+        # 确保必填字段已提取
+        if bgp_info['bgp_local_router_id'] and bgp_info['bgp_local_as_number']:
+            # 分离未建立状态的 Peers
+            bgp_non_established_peers = [
+                peer for peer in bgp_info.get("peers", [])
+                if peer.get("state", "").lower() != "established"
+            ]
+            bgp_info['bgp_non_established_peers'] = bgp_non_established_peers
+
+            logging.info(f"提取到本地 BGP Router ID: {bgp_info['bgp_local_router_id']}，AS Number: {bgp_info['bgp_local_as_number']}，总 Peers: {bgp_info['bgp_total_peers']}，建立状态的 Peers: {bgp_info['bgp_established_peers']}")
+            logging.info(f"提取到 {len(bgp_info['peers'])} 个 Peer 信息。")
             return bgp_info
         else:
-            logging.warning("Failed to extract some BGP information from 'display bgp all summary' output.")
-            return None
+            logging.warning("未能完全提取到本地 BGP 信息。")
+            return {}
 
     def parse_display_ip_interface_brief(self, output: str) -> List[Dict[str, str]]:
         """
-        Parse the output of 'display ip interface brief', exclude interfaces with 'unassigned' IP, and return structured data.
+        解析 'display ip interface brief' 的输出，排除IP地址为 '--' 的接口，并返回结构化数据。
 
-        :param output: Command output.
-        :return: List of interface information dictionaries.
+        :param output: 命令输出。
+        :return: 接口信息字典的列表。
         """
         lines = output.splitlines()
         interfaces = []
         header_found = False
 
-        # Regular expression to match interface lines
+        # 更新后的正则表达式，匹配新的输出格式
         interface_regex = re.compile(
-            r'^\s*(?P<interface>\S+)\s+'
-            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|unassigned)\s+'
-            r'(?P<physical>up|down)\s+'
-            r'(?P<protocol>up|down)\s+'
-            r'(?P<vpn>\S+)'
+            r'^\s*(?P<interface>\S+)\s+'                    # Interface
+            r'(?P<physical>up|down)\s+'                     # Physical
+            r'(?P<protocol>up(?:\(\w\))?|down(?:\(\w\))?)\s+'# Protocol，可能带有附加信息如(up(s))
+            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|--)\s+' # IP address/Mask 或 --
+            r'(?P<vpn>\S+)\s+'                               # VPN instance
+            r'(?P<description>.*)$'                          # Description
         )
 
         for line in lines:
-            # Look for table header
+            # 查找表头
             if not header_found:
-                if re.match(r'^Interface\s+IP Address/Mask\s+Physical\s+Protocol\s+VPN', line):
+                if re.match(r'^Interface\s+Physical\s+Protocol\s+IP address/Mask\s+VPN instance\s+Description', line):
                     header_found = True
-                    logging.debug("Found 'display ip interface brief' table header.")
+                    logging.debug("找到 'display ip interface brief' 表头。")
                 continue
             else:
-                # Skip empty lines or separator lines
+                # 跳过空行或分隔线
                 if not line.strip() or re.match(r'^[-=]+$', line):
                     continue
 
                 match = interface_regex.match(line)
                 if match:
                     ip_address = match.group('ip_address')
-                    if ip_address.lower() != 'unassigned':
+                    if ip_address != '--':
                         interface_info = {
                             'Interface': match.group('interface'),
                             'IP Address/Mask': match.group('ip_address'),
                             'Physical': match.group('physical'),
                             'Protocol': match.group('protocol'),
-                            'VPN': match.group('vpn')
+                            'VPN': match.group('vpn'),
+                            'Description': match.group('description').strip()  # 去除描述字段的前后空白
                         }
                         interfaces.append(interface_info)
-                        logging.debug(f"Parsed interface: {interface_info}")
+                        logging.debug(f"解析的接口信息: {interface_info}")
                 else:
-                    logging.debug(f"Unmatched line in 'display ip interface brief': {line}")
+                    logging.debug(f"在 'display ip interface brief' 中未匹配的行: {line}")
                     continue
 
-        logging.debug(f"Parsed Telnet interfaces: {interfaces}")
+        logging.debug(f"解析后的 Telnet 接口列表: {interfaces}")
         return interfaces
 
     def parse_display_ospf_interface(self, output: str) -> List[str]:
         """
-        Parse the output of 'display ospf interface' to extract OSPF-configured interfaces.
+        解析 'display ospf interface' 的输出，以提取配置了 OSPF 的接口名称。
 
-        :param output: Command output.
-        :return: List of OSPF-configured interface names in standardized format.
+        :param output: 命令输出。
+        :return: OSPF 配置的接口名称列表，格式如 'GigabitEthernet1/0'。
         """
         interfaces = []
         lines = output.splitlines()
-        parsing = False  # Flag to indicate if parsing has started
+        in_interfaces_section = False
+        in_table_header = False
 
-        # Regular expression to match interface lines
-        interface_regex = re.compile(r'^\s*(?P<interface>\S+)\s+[\d\.]+')
+        # 正则表达式匹配 Area 行和 IP Address 行
+        area_regex = re.compile(r'^Area:\s+\d+\.\d+\.\d+\.\d+')
+        ip_header_regex = re.compile(r'^IP Address\s+Type\s+State\s+Cost\s+Pri\s+DR\s+BDR', re.IGNORECASE)
+        ip_entry_regex = re.compile(
+            r'^(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+'
+            r'(?P<type>\S+)\s+'
+            r'(?P<state>\S+)\s+'
+            r'(?P<cost>\d+)\s+'
+            r'(?P<pri>\d+)\s+'
+            r'(?P<dr>\d+\.\d+\.\d+\.\d+)\s+'
+            r'(?P<bdr>\d+\.\d+\.\d+\.\d+)'
+        )
+
+        # 收集 OSPF 配置的 IP 地址
+        ospf_ip_addresses = set()
 
         for line in lines:
-            if "Interfaces" in line:
-                parsing = True
-                logging.debug("Starting to parse OSPF interface information.")
+            line = line.strip()
+            if not in_interfaces_section:
+                if line.startswith("Interfaces"):
+                    in_interfaces_section = True
+                    logging.debug("进入 'Interfaces' 部分。")
                 continue
-            if parsing:
-                # Skip empty lines and separator lines
-                if not line.strip() or re.match(r'^[-=]+$', line):
+            else:
+                if area_regex.match(line):
+                    logging.debug(f"检测到 Area 行: {line}")
                     continue
-                # Match interface lines
-                match = interface_regex.match(line)
-                if match:
-                    iface = match.group('interface')
-                    logging.debug(f"Found OSPF interface: {iface}")
-                    # Format interface name
-                    if iface.lower().startswith('eth'):
-                        iface_number = iface[3:]  # Remove 'Eth' prefix
-                        iface_formatted = f"Ethernet{iface_number}"
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                    elif iface.lower().startswith('loop'):
-                        # Handle Loop interfaces like Loop0
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                if ip_header_regex.match(line):
+                    in_table_header = True
+                    logging.debug("检测到 IP 地址表头。")
+                    continue
+                if in_table_header:
+                    if not line or re.match(r'^[-=]+$', line):
+                        continue  # 跳过空行和分隔线
+                    match = ip_entry_regex.match(line)
+                    if match:
+                        ip_address_full = match.group('ip_address')
+                        # 如果 IP 地址带有掩码（如10.0.38.2/24），去除掩码部分
+                        ip_address = ip_address_full.split('/')[0] if '/' in ip_address_full else ip_address_full
+                        ospf_ip_addresses.add(ip_address)
+                        logging.debug(f"提取到 OSPF 配置的 IP 地址: {ip_address}")
                     else:
-                        # Handle other interface types as needed
-                        iface_formatted = iface.capitalize()
-                        interfaces.append(iface_formatted)
-                        logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
-                else:
-                    logging.debug(f"Unmatched OSPF interface line: {line}")
-        logging.debug(f"Parsed OSPF interfaces: {interfaces}")
+                        logging.debug(f"未匹配的 OSPF 接口行: {line}")
+
+        # 通过 IP 地址映射到接口名称
+        # self.telnet_configurations 是一个字典，键为 "host:port"，值为接口信息列表
+        for host_port, interfaces_info in self.telnet_configurations.items():
+            for iface in interfaces_info:
+                ip_mask = iface.get('IP Address/Mask', '')
+                iface_ip = ip_mask.split('/')[0] if '/' in ip_mask else ip_mask
+                if iface_ip in ospf_ip_addresses:
+                    interface_name = iface.get('Interface', '').lower()
+                    standardized_interface = self.standardize_interface_name(interface_name)
+                    if standardized_interface and standardized_interface not in interfaces:
+                        interfaces.append(standardized_interface)
+                        logging.debug(f"通过 IP 地址 {iface_ip} 映射到接口名称: {standardized_interface}")
+
+        logging.debug(f"解析后的 OSPF 接口列表: {interfaces}")
         return interfaces
+
+    def standardize_interface_name(self, interface_name: str) -> Optional[str]:
+        """
+        将接口名称标准化为统一格式，例如将 'GE1/0' 转换为 'GigabitEthernet1/0'。
+
+        :param interface_name: 原始接口名称。
+        :return: 标准化后的接口名称，或 None 如果无法标准化。
+        """
+        interface_mapping = {
+            'ge': 'GigabitEthernet',
+            'gi': 'GigabitEthernet',
+            'eth': 'Ethernet',
+            'loop': 'Loopback',
+            'lo': 'Loopback',
+            # 根据实际需要添加更多接口类型的映射
+        }
+
+        # 正则表达式匹配接口类型和编号，例如 'GE1/0' 或 'Loop0'
+        pattern = re.compile(r'^([a-zA-Z]+)(\d+)(?:/(\d+))?$')
+        match = pattern.match(interface_name.lower())
+        if match:
+            iface_type, slot, port = match.groups()
+            standardized_type = interface_mapping.get(iface_type, iface_type.capitalize())
+            if port:
+                # 构建标准化接口名称，包含 '/' 和端口号
+                standardized_name = f"{standardized_type}{slot}/{port}"
+            else:
+                # 构建标准化接口名称，不包含 '/'
+                standardized_name = f"{standardized_type}{slot}"
+            return standardized_name
+        else:
+            logging.warning(f"无法标准化的接口名称: {interface_name}")
+            return None
 
     def connect_and_get_sysnames_and_configs(self):
         nodes = self.telnet_info.get("node", [])
@@ -480,7 +574,7 @@ class RouterManager:
             future_to_node = {}
             for node in nodes:
                 image_type = node.get("image_type", "").lower()
-                if "huaweine40" in image_type:
+                if "h3c" in image_type:
                     host, port = node.get("hostip"), node.get("port")
                     if not host or not port:
                         logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
@@ -537,30 +631,32 @@ class RouterManager:
             bgp_info_dict[host_port] = {}
 
             for iface in node_interfaces:
-                # Format interface name, e.g., type="ethernet" name="e1/0/0" => "Ethernet1/0/0"
+                # Get raw interface name
                 iface_name = iface['name']
-                if iface_name.lower().startswith('e'):
-                    iface_number = iface_name[1:]  # Remove 'e' prefix
-                    iface_formatted = f"Ethernet{iface_number}"
+                
+                # Standardize the interface name
+                standardized_interface = self.standardize_interface_name(iface_name)
+                
+                if standardized_interface:
+                    iface_formatted = standardized_interface
+                    iface_formatted_lower = iface_formatted.lower()
+                    logging.debug(f"[{host_port}] Standardized interface name: {iface_formatted}")
+
+                    # Determine if interface has IP configured
+                    config_status = "已配置IP地址" if iface_formatted_lower in telnet_interface_names else "未配置IP地址"
+
+                    # Determine OSPF configuration status
+                    ospf_iface_status = "OSPF已配置" if iface_formatted_lower in ospf_interfaces_lower else "OSPF未配置"
+
+                    # Determine ISIS configuration status
+                    isis_iface_status = "ISIS已配置" if iface_formatted_lower in isis_interfaces_lower else "ISIS未配置"
+
+                    status = f"{iface_formatted}接口配置状态: {config_status}, {ospf_iface_status}, {isis_iface_status}"
+                    interface_status[host_port].append(status)
+                    logging.info(f"[{host_port}] {status}")
                 else:
-                    # If interface name does not start with 'e', format as per type
-                    iface_formatted = f"{iface['type'].capitalize()}{iface['name']}"
-
-                iface_formatted_lower = iface_formatted.lower()
-                logging.debug(f"[{host_port}] Formatted interface name: {iface_formatted}")
-
-                # Determine if interface has IP configured
-                config_status = "已配置IP地址" if iface_formatted_lower in telnet_interface_names else "未配置IP地址"
-
-                # Determine OSPF configuration status
-                ospf_iface_status = "OSPF已配置" if iface_formatted_lower in ospf_interfaces_lower else "OSPF未配置"
-
-                # Determine ISIS configuration status
-                isis_iface_status = "ISIS已配置" if iface_formatted_lower in isis_interfaces_lower else "ISIS未配置"
-
-                status = f"{iface_formatted}接口配置状态: {config_status}, {ospf_iface_status}, {isis_iface_status}"
-                interface_status[host_port].append(status)
-                logging.info(f"[{host_port}] {status}")
+                    logging.warning(f"[{host_port}] Interface name '{iface_name}' could not be standardized. Skipping.")
+                    continue
 
             # Determine OSPF status based on 'display ospf peer' and OSPF interfaces
             if host_port in self.telnet_router_ids:
@@ -587,17 +683,12 @@ class RouterManager:
 
             # Extract BGP info
             if bgp_info:
-                bgp_local_router_id = bgp_info.get("bgp_local_router_id", "未知")
-                bgp_local_as_number = bgp_info.get("bgp_local_as_number", "未知")
-                bgp_total_peers = bgp_info.get("bgp_total_peers", 0)
-                bgp_established_peers = bgp_info.get("bgp_established_peers", 0)
                 bgp_non_established_peers = bgp_info.get("bgp_non_established_peers", [])
-
                 bgp_info_dict[host_port] = {
-                    "bgp_local_router_id": bgp_local_router_id,
-                    "bgp_local_as_number": bgp_local_as_number,
-                    "bgp_total_peers": bgp_total_peers,
-                    "bgp_established_peers": bgp_established_peers,
+                    "bgp_local_router_id": bgp_info.get("bgp_local_router_id", "未知"),
+                    "bgp_local_as_number": bgp_info.get("bgp_local_as_number", "未知"),
+                    "bgp_total_peers": bgp_info.get("bgp_total_peers", 0),
+                    "bgp_established_peers": bgp_info.get("bgp_established_peers", 0),
                     "bgp_non_established_peers": bgp_non_established_peers
                 }
             else:
@@ -757,7 +848,7 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
     """
     Write interface status and OSPF/ISIS/BGP status to data.txt in the following format:
     Node: sysname1 (host:port)
-        Interface: Ethernet1/0/0接口配置状态: 已配置IP地址, OSPF已配置, ISIS未配置
+        Interface: GigabitEthernet1/0接口配置状态: 已配置IP地址, OSPF已配置, ISIS未配置
         OSPF Status: OSPF 配置正常，邻居 Router IDs: 2.2.2.2, 1.1.1.1
         ISIS Status: ISIS 配置正常，邻居数量: 1
         BGP Local Router ID: 3.3.3.3
@@ -768,7 +859,7 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
             Peer IP: x.x.x.x, AS: y, State: Z
 
     Node: sysname2 (host:port)
-        Interface: Ethernet1/0/2接口配置状态: 未配置IP地址, OSPF未配置, ISIS未配置
+        Interface: GigabitEthernet1/0/2接口配置状态: 未配置IP地址, OSPF未配置, ISIS未配置
         OSPF Status: OSPF 未配置
         ISIS Status: ISIS 未配置
         BGP 未配置
@@ -796,12 +887,12 @@ def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
                     f.write(f"    BGP 总邻居数量: {bgp_info.get('bgp_total_peers')}\n")
                     f.write(f"    BGP 建立状态的邻居数量: {bgp_info.get('bgp_established_peers')}\n")
 
-                    non_established_peers = bgp_info.get("bgp_non_established_peers", [])
-                    if non_established_peers:
+                    bgp_non_established_peers = bgp_info.get("bgp_non_established_peers", [])
+                    if bgp_non_established_peers:
                         f.write(f"    BGP 未建立状态的邻居:\n")
-                        for peer in non_established_peers:
+                        for peer in bgp_non_established_peers:
                             peer_ip = peer.get("peer_ip", "未知")
-                            peer_as = peer.get("peer_as", "未知")
+                            peer_as = peer.get("as_number", "未知")  # 修正键名
                             state = peer.get("state", "未知")
                             f.write(f"        Peer IP: {peer_ip}, AS: {peer_as}, State: {state}\n")
                     else:

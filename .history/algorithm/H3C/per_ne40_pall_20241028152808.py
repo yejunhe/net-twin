@@ -42,7 +42,7 @@ class RouterTelnetManager:
                     print(f"Sysname for {host}:{port} is {sysname}")
 
                     # 发送 scr 0 t 指令以确保可以正确输出路由表
-                    tn.write(b'scr 0 t\n')
+                    tn.write(b'screen-length disable\n')
                     tn.read_until(b'>', timeout=3)
 
                     # 发送命令获取路由表
@@ -69,12 +69,12 @@ class RouterTelnetManager:
     def parse_routing_table(self, routing_table):
         """解析路由表，找到第一次出现 OSPF 的目的地址，并去掉子网掩码"""
         for line in routing_table.splitlines():
-            if 'OSPF' in line:
+            if 'IS_L1' in line:
                 parts = line.split()
                 if parts:
                     # 提取目的地址并去除子网掩码（如果有）
                     dest_ip = parts[0].split('/')[0]
-                    print(f"Found OSPF route: {dest_ip}")
+                    print(f"Found IS_L1 route: {dest_ip}")
                     return dest_ip
         print("No OSPF route found")
         return None
@@ -88,30 +88,26 @@ class RouterTelnetManager:
 
             # 配置 NQA 测试实例
             nqa_commands = [
-                b'nqa test-instance admin perfor_test\n',
-                b'test-type icmpjitter\n',
-                f'destination-address ipv4 {dest_ip}\n'.encode('ascii'),
-                b'probe-count 2\n',
-                b'interval milliseconds 100\n',
-                b'timeout 1\n'
+                b'nqa entry admin perfor_test\n',
+                b'type icmp-jitter\n',
+                f'destination ip {dest_ip}\n'.encode('ascii'),
+                b'frequency 100\n',
+                b'quit\n',
+                
             ]
             for cmd in nqa_commands:
                 tn.write(cmd)
                 tn.read_until(b']', timeout=3)
-
+            
             # 发送命令开始测试
-            tn.write(b'start now\n')
-            tn.read_until(b']', timeout=3)
-
-            # 确保配置提交
-            tn.write(b'commit\n')
+            tn.write(b'nqa schedule admin perfor_test start-time now lifetime forever\n')
             tn.read_until(b']', timeout=3)
 
             # 尝试获取 NQA 测试结果
             attempt_count = 0
             result = ""
             while attempt_count < max_attempts:
-                tn.write(b'display nqa results test-instance admin perfor_test\n')
+                tn.write(b'display nqa result admin perfor_test\n')
                 partial_output = tn.read_until(b'>', timeout=5).decode('ascii')
                 result += partial_output
 
@@ -131,16 +127,7 @@ class RouterTelnetManager:
             print(result)
 
             # 执行结束和清理命令
-            tn.write(b'stop\n')
-            tn.read_until(b'>', timeout=3)
-
-            tn.write(b'q\n')
-            tn.read_until(b'>', timeout=3)
-
-            tn.write(b'undo nqa test-instance admin perfor_test\n')
-            tn.read_until(b']', timeout=3)
-
-            tn.write(b'commit\n')
+            tn.write(b'undo nqa schedule admin perfor_test\n')
             tn.read_until(b']', timeout=3)
 
             # 解析并返回性能评估输入
@@ -219,8 +206,8 @@ class RouterTelnetManager:
         }
 
         # 定义性能评估的阈值
-        latency_thresholds = {"good": 100, "average": 200}
-        jitter_thresholds = {"good": 50, "average": 100}
+        latency_thresholds = {"good": 50, "average": 100}
+        jitter_thresholds = {"good": 20, "average": 50}
         packet_loss_thresholds = {"good": 1, "average": 5}
 
         # 评估延迟
