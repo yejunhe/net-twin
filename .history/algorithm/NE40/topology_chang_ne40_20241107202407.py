@@ -293,6 +293,7 @@ class RouterManager:
             "interface_status": interface_status
         }
 
+
     def read_unl_file(self, lab_id: int):
         unl_file_path = f"/opt/unetlab/labs/{lab_id}.unl"
         try:
@@ -364,6 +365,7 @@ class RouterManager:
             logging.info("成功将UNL文件解析为网络连接。")
         except ET.ParseError as e:
             logging.error(f"解析UNL文件时出错: {e}")
+
 
 class ArgumentParserCustom:
     """解析命令行参数"""
@@ -467,7 +469,7 @@ class UnlParser:
 class HistoryManager:
     """管理历史记录，包括加载和保存历史JSON文件"""
 
-    HISTORY_DIR = '/tmp'
+    HISTORY_DIR = '/opt/unetlab/labs_history'
 
     def __init__(self, lab_id):
         self.lab_id = lab_id
@@ -610,7 +612,6 @@ class TopologyChangeDetector:
     def __init__(self, input_path, output_path):
         self.input_path = input_path
         self.output_path = output_path
-        self.current_json = None  # 添加这一行
 
     def run(self):
         start_time = datetime.now()
@@ -628,7 +629,6 @@ class TopologyChangeDetector:
             # 解析.unl文件
             unl_parser = UnlParser(lab_id)
             current_json = unl_parser.parse_unl_to_json()
-            self.current_json = current_json  # 保存当前拓扑
 
             # 加载历史记录
             history_manager = HistoryManager(lab_id)
@@ -688,6 +688,8 @@ class InterfaceStatusWriter:
             logging.error(f"写入 {self.data_txt_path} 时出错: {e}")
             sys.exit(1)
 
+            
+
 class OutputWriter:
     """将检测到的变化内容格式化为报告"""
 
@@ -821,6 +823,17 @@ class OutputWriter:
                 changes[key] = {'old': old[key], 'new': None}
         return changes
 
+    def write_output(self, content):
+        """将内容写入输出文件"""
+        try:
+            with open(self.output_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logging.info(f"拓扑变更报告已输出到 {self.output_path}")
+            print(f"拓扑变更报告已输出到 {self.output_path}")
+        except Exception as e:
+            logging.error(f"无法写入输出文件 {self.output_path}。错误信息: {e}")
+            raise IOError(f"无法写入输出文件 {self.output_path}。错误信息: {e}")
+
 class CombinedScriptManager:
     """协调路由器管理和拓扑变更检测的主控类"""
 
@@ -903,7 +916,9 @@ class CombinedScriptManager:
         else:
             topology_report = output_writer.format_diff(topology_differences, start_time, execution_result)
 
-        # 将拓扑变化报告追加到 data.txt
+        # 将拓扑变化信息添加到主要的输出 JSON 中
+        # 由于用户不需要 JSON 输出，我们将仅写入报告和接口状态
+        # 将拓扑变化报告写入到 data.txt
         try:
             with open(data_txt_path, 'a', encoding='utf-8') as f:
                 f.write("\n拓扑变更检测报告:\n")
@@ -913,20 +928,15 @@ class CombinedScriptManager:
             logging.error(f"无法将拓扑变更检测报告追加到 {data_txt_path}。错误信息: {e}")
             sys.exit(1)
 
-        # 保存历史记录
-        history_manager = HistoryManager(lab_id)
-        if topology_differences is None:
-            # 首次运行，保存当前拓扑作为历史记录
+        # 保存历史记录（仅在拓扑检测成功时）
+        if topology_differences and 'error' not in topology_differences:
             try:
-                current_json = topology_detector.current_json
-                history_manager.save_history(current_json)
-                logging.info("首次运行，历史记录已创建。")
-            except Exception as e:
-                logging.error(f"无法保存历史记录。错误信息: {e}")
-        elif topology_differences and 'error' not in topology_differences:
-            # 后续运行，更新历史记录
-            try:
-                current_json = topology_detector.current_json
+                param_reader = ParamReader(self.input_path)
+                param = param_reader.read_param()
+                lab_id = param.get('labId')
+                unl_parser = UnlParser(lab_id)
+                current_json = unl_parser.parse_unl_to_json()
+                history_manager = HistoryManager(lab_id)
                 history_manager.save_history(current_json)
                 logging.info("历史记录已更新。")
             except Exception as e:
@@ -1160,27 +1170,18 @@ class CombinedScriptManager:
             logging.error(f"无法将拓扑变更检测报告追加到 {data_txt_path}。错误信息: {e}")
             sys.exit(1)
 
-        # 保存历史记录
-        history_manager = HistoryManager(lab_id)
-        if topology_differences is None:
-            # 首次运行，保存当前拓扑作为历史记录
+        # 保存历史记录（仅在拓扑检测成功时）
+        if topology_differences and 'error' not in topology_differences:
             try:
-                current_json = topology_detector.current_json
-                history_manager.save_history(current_json)
-                logging.info("首次运行，历史记录已创建。")
-            except Exception as e:
-                logging.error(f"无法保存历史记录。错误信息: {e}")
-        elif topology_differences and 'error' not in topology_differences:
-            # 后续运行，更新历史记录
-            try:
-                current_json = topology_detector.current_json
+                unl_parser = UnlParser(lab_id)
+                current_json = unl_parser.parse_unl_to_json()
+                history_manager = HistoryManager(lab_id)
                 history_manager.save_history(current_json)
                 logging.info("历史记录已更新。")
             except Exception as e:
                 logging.error(f"无法保存历史记录。错误信息: {e}")
 
         logging.info("所有任务已完成。")
-        logging.info(json.dumps(interface_mapping, indent=4, ensure_ascii=False))
 
 def main():
     # 解析命令行参数
