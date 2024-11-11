@@ -314,7 +314,7 @@ class RouterManager:
                 if iface_formatted_lower in telnet_interface_names:
                     config_status = "已配置IP地址"
                 else:
-                    config_status = "拓扑节点接口连接其他节点，还未配置IP地址或者节点接口被关闭"
+                    config_status = "拓扑节点接口连接其他节点但未配置IP地址或者节点接口被关闭"
 
                 status = f"    接口: {iface_formatted}接口配置状态: {config_status}\n"
                 interface_status[host_port]["statuses"] += status

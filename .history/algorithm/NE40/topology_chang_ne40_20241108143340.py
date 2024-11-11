@@ -17,14 +17,13 @@ from datetime import datetime
 def setup_logging():
     """配置日志记录"""
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)  # 修改为INFO以捕捉INFO及更高级别的日志
+    logger.setLevel(logging.DEBUG)  # 设置为DEBUG以捕捉所有级别的日志
 
     formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
 
     # 文件处理器，限制日志文件大小为5MB，保留5个备份
     try:
         file_handler = RotatingFileHandler("combined_script.log", maxBytes=5*1024*1024, backupCount=5)
-        file_handler.setLevel(logging.DEBUG)  # 保持文件中记录所有级别的日志
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     except Exception as e:
@@ -33,7 +32,6 @@ def setup_logging():
 
     # 控制台处理器
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)  # 仅在控制台显示INFO及更高级别的日志
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
@@ -314,7 +312,7 @@ class RouterManager:
                 if iface_formatted_lower in telnet_interface_names:
                     config_status = "已配置IP地址"
                 else:
-                    config_status = "拓扑节点接口连接其他节点，还未配置IP地址或者节点接口被关闭"
+                    config_status = "拓扑节点接口连接其他节点但未配置IP地址"
 
                 status = f"    接口: {iface_formatted}接口配置状态: {config_status}\n"
                 interface_status[host_port]["statuses"] += status
@@ -498,7 +496,7 @@ class UnlParser:
 class HistoryManager:
     """管理历史记录，包括加载和保存历史JSON文件"""
 
-    HISTORY_DIR = '/opt/unetlab/labs_history'
+    HISTORY_DIR = '/tmp'
 
     def __init__(self, lab_id):
         self.lab_id = lab_id
