@@ -353,6 +353,7 @@ class RouterManager:
         logging.debug(f"Parsed ISIS interfaces: {interfaces}")
         return interfaces
 
+
     def parse_display_bgp_all_summary(self, output: str) -> Optional[Dict[str, Any]]:
         """
         Parse the output of 'display bgp all summary' to extract BGP information.
@@ -918,6 +919,91 @@ def load_telnet_info(input_path: str) -> Dict[str, Any]:
         logging.error(f"Error decoding JSON from param.json: {e}")
         sys.exit(1)
 
+def write_output(output_path: str, data: Dict[str, Any]):
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)  # Use ensure_ascii=False to support Chinese
+        logging.info(f"Mapping results written to {output_path}")
+    except IOError as e:
+        logging.error(f"Error writing to output file: {e}")
+        sys.exit(1)
+
+def write_interface_status(data_txt_path: str, mapping: Dict[str, Any]):
+    """
+    Write interface status and OSPF/ISIS/BGP status to data.txt in the following format:
+    Node: sysname1 (host:port)
+        Interface: Ethernet1/0/0接口配置状态: 已配置IP地址, OSPF已配置, ISIS未配置
+        OSPF Status: OSPF 配置正常，邻居 Router IDs: 2.2.2.2, 1.1.1.1
+        ISIS Status: ISIS 配置正常，邻居数量: 1
+        BGP Local Router ID: 3.3.3.3
+        BGP Local AS Number: 100
+        BGP Total Peers: 3
+        BGP Established Peers: 2
+        BGP Non-Established Peers:
+            Peer IP: x.x.x.x, AS: y, State: Z
+
+    Recommendations:
+        - 未配置 OSPF 接口:
+            - Router1 (192.168.1.1:23) - Ethernet1/0/0
+            - Router2 (192.168.1.2:23) - Ethernet1/0/1
+        - 未配置 ISIS 接口:
+            - Router1 (192.168.1.1:23) - Ethernet1/0/0
+        - 未配置 BGP:
+            - Router3 (192.168.1.3:23)
+        - 接口缺少 IP 配置:
+            - Router4 (192.168.1.4:23) - Ethernet1/0/2
+    """
+    try:
+        with open(data_txt_path, 'w', encoding='utf-8') as f:
+            telnet_devices = mapping.get("telnet_devices", {})
+            for host_port, device_info in telnet_devices.items():
+                sysname = device_info.get("sysname", "未知节点")
+                interface_status_list = device_info.get("interface_status", [])
+                ospf_status = device_info.get("ospf_status", "未配置 OSPF")
+                isis_status = device_info.get("isis_status", "未配置 ISIS")
+                bgp_info = device_info.get("bgp_info", {})
+
+                f.write(f"节点: {sysname} ({host_port})\n")
+                for status in interface_status_list:
+                    f.write(f"    接口: {status}\n")
+                f.write(f"    OSPF 状态: {ospf_status}\n")
+                f.write(f"    ISIS 状态: {isis_status}\n")
+
+                # Write BGP information
+                if bgp_info and bgp_info.get("bgp_local_router_id") != "未知":
+                    f.write(f"    BGP 本地 Router ID: {bgp_info.get('bgp_local_router_id')}\n")
+                    f.write(f"    BGP 本地 AS Number: {bgp_info.get('bgp_local_as_number')}\n")
+                    f.write(f"    BGP 总邻居数量: {bgp_info.get('bgp_total_peers')}\n")
+                    f.write(f"    BGP 建立状态的邻居数量: {bgp_info.get('bgp_established_peers')}\n")
+
+                    non_established_peers = bgp_info.get("bgp_non_established_peers", [])
+                    if non_established_peers:
+                        f.write(f"    BGP 未建立状态的邻居:\n")
+                        for peer in non_established_peers:
+                            peer_ip = peer.get("peer_ip", "未知")
+                            peer_as = peer.get("peer_as", "未知")
+                            state = peer.get("state", "未知")
+                            f.write(f"        Peer IP: {peer_ip}, AS: {peer_as}, State: {state}\n")
+                    else:
+                        f.write(f"    BGP 未建立状态的邻居: 无\n")
+                else:
+                    f.write(f"    BGP 未配置\n")
+
+                f.write("\n")  # Add empty line between devices
+
+            # Write Recommendations
+            recommendations = mapping.get("recommendations", {})
+            f.write("建议:\n")
+            for category, items in recommendations.items():
+                if items:
+                    f.write(f"    - {category}:\n")
+                    for item in items:
+                        f.write(f"        - {item}\n")
+        logging.info(f"接口状态已写入 {data_txt_path}")
+    except IOError as e:
+        logging.error(f"写入 {data_txt_path} 时出错: {e}")
+        sys.exit(1)
+
 def main(input_path: str, output_path: str):
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
@@ -942,12 +1028,12 @@ def main(input_path: str, output_path: str):
 
     logging.info("Collected router configurations:")
     logging.info(json.dumps(mapping, indent=4, ensure_ascii=False))
-    router_manager.write_output(output_path, mapping)
+    write_output(output_path, mapping)
 
     # Define the path for data.txt, placed in the same directory as output_path
     output_dir = os.path.dirname(output_path)
     data_txt_path = os.path.join(output_dir, "data.txt")
-    router_manager.write_interface_status(data_txt_path, mapping)
+    write_interface_status(data_txt_path, mapping)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process router configurations from param.json.")
@@ -955,3 +1041,4 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
     args = parser.parse_args()
     main(args.input, args.output)
+
