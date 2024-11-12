@@ -10,7 +10,13 @@ import logging
 from typing import Optional, Dict, Any, List, Tuple, Set
 import xml.etree.ElementTree as ET
 import re
-import ipaddress  # Import for network calculations
+
+# Configure logging for better traceability and control
+logging.basicConfig(
+    level=logging.DEBUG,  # Set to DEBUG for more detailed logs
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 
 def normalize_interface_name(interface_name: str) -> str:
@@ -53,7 +59,7 @@ class RouterManager:
     def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
         self.telnet_info = telnet_info
         self.telnet_sysnames: Dict[str, str] = {}
-        self.telnet_configurations: Dict[str, List[Dict[str, Any]]] = {}  # Structured interface info
+        self.telnet_configurations: Dict[str, List[Dict[str, str]]] = {}  # Structured interface info
         self.telnet_ospf_interfaces: Dict[str, List[str]] = {}  # Interfaces configured with OSPF
         self.telnet_router_ids: Dict[str, str] = {}  # Router IDs per device
         self.telnet_ospf_peers: Dict[str, List[str]] = {}  # OSPF neighbor Router IDs per device
@@ -79,8 +85,6 @@ class RouterManager:
                 b'q\n'
             )
         }
-        # Additional mappings for network segments
-        self.interface_network_to_device: Dict[str, str] = {}  # Maps network segment to device key
 
     def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: List[str], quit_cmd: bytes) -> Dict[str, str]:
         """
@@ -143,12 +147,6 @@ class RouterManager:
             return {}
 
     def get_prompt(self, tn: telnetlib.Telnet) -> Optional[str]:
-        """
-        Retrieve the current prompt from the Telnet session.
-
-        :param tn: Telnet connection object.
-        :return: The prompt string if found, else None.
-        """
         try:
             time.sleep(1)
             output = tn.read_very_eager().decode('ascii', errors='ignore')
@@ -161,12 +159,6 @@ class RouterManager:
             return None
 
     def get_sysname_via_telnet(self, tn: telnetlib.Telnet) -> Optional[str]:
-        """
-        Retrieve the system name (sysname) from the Telnet session.
-
-        :param tn: Telnet connection object.
-        :return: The sysname if found, else None.
-        """
         try:
             tn.write(b'\n')
             time.sleep(1)
@@ -183,13 +175,6 @@ class RouterManager:
             return None
 
     def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[Dict[str, str]]:
-        """
-        Retrieve and parse configurations from the router via Telnet.
-
-        :param tn: Telnet connection object.
-        :param image_type: The image type of the device to determine command sequences.
-        :return: The command outputs if successful, else None.
-        """
         # Find matching device type based on partial image_type
         matched_key = next((key for key in self.commands_map if key in image_type), None)
         if not matched_key:
@@ -348,7 +333,7 @@ class RouterManager:
             if len(parts) < 1:
                 continue
             iface = parts[0]
-            # Use normalize_interface_name to handle various interface name formats
+            # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
             iface_formatted = normalize_interface_name(iface)
             interfaces.append(iface_formatted)
             logging.debug(f"Detected ISIS-configured interface: {iface_formatted}")
@@ -362,7 +347,7 @@ class RouterManager:
 
         :param output: 命令输出。
         :return: 包含 BGP 本地 Router ID、本地 AS 号、总对等体数、已建立对等体数、未建立对等体列表、
-                Established peers with different AS、边界路由器标志的字典。如果解析失败，则返回 None。
+                边界路由器标志的字典。如果解析失败，则返回 None。
         """
         bgp_info = {
             "bgp_local_router_id": None,
@@ -370,14 +355,14 @@ class RouterManager:
             "bgp_total_peers": 0,
             "bgp_established_peers": 0,
             "bgp_non_established_peers": [],
-            "bgp_established_different_as_peers": [],  # Established peers with different AS
-            "is_boundary_router": False  # Flag indicating if it's a boundary router
+            "bgp_established_different_as_peers": [],  # 新增: Established peers with different AS
+            "is_boundary_router": False  # 新增标志，用于表示是否为边界路由器
         }
 
         lines = output.splitlines()
         logging.debug("解析 'display bgp all summary' 输出。")
 
-        # Define regex patterns
+        # 定义正则表达式模式
         key_value_regex = re.compile(r'(\w+(?:\s+\w+)*)\s*:\s*([\d\.]+)', re.IGNORECASE)
         peer_entry_regex = re.compile(
             r'^(?P<peer_ip>\S+)\s+'
@@ -391,91 +376,92 @@ class RouterManager:
 
         local_as_number = None
         peer_as_numbers = set()
-        inter_as_established_peers: List[str] = []  # List to store inter-AS established peer IPs
+        inter_as_established_peers: List[str] = []  # 新增: List to store inter-AS established peer IPs
         in_peer_table = False  # Flag to indicate if parsing peer table
 
         for line in lines:
-            # Extract key-value pairs
+            # 提取键值对
             key_value_matches = key_value_regex.findall(line)
             for key, value in key_value_matches:
                 key = key.strip().lower()
                 if key == 'bgp local router id':
                     bgp_info["bgp_local_router_id"] = value
-                    logging.debug(f"Detected BGP Local Router ID: {bgp_info['bgp_local_router_id']}")
+                    logging.debug(f"检测到 BGP 本地 Router ID: {bgp_info['bgp_local_router_id']}")
                 elif key == 'local as number':
                     try:
                         local_as_number = int(value)
                         bgp_info["bgp_local_as_number"] = local_as_number
-                        logging.debug(f"Detected Local AS Number: {bgp_info['bgp_local_as_number']}")
+                        logging.debug(f"检测到本地 AS 号: {bgp_info['bgp_local_as_number']}")
                     except ValueError:
-                        logging.error(f"Unable to parse Local AS Number: {value}")
+                        logging.error(f"无法解析本地 AS 号: {value}")
                 elif key == 'total number of peers':
                     try:
                         bgp_info["bgp_total_peers"] = int(value)
-                        logging.debug(f"Detected Total BGP Peers: {bgp_info['bgp_total_peers']}")
+                        logging.debug(f"检测到 BGP 总对等体数: {bgp_info['bgp_total_peers']}")
                     except ValueError:
-                        logging.error(f"Unable to parse Total BGP Peers: {value}")
+                        logging.error(f"无法解析 BGP 总对等体数: {value}")
                 elif key == 'peers in established state':
                     try:
                         bgp_info["bgp_established_peers"] = int(value)
-                        logging.debug(f"Detected Established BGP Peers: {bgp_info['bgp_established_peers']}")
+                        logging.debug(f"检测到已建立的 BGP 对等体数: {bgp_info['bgp_established_peers']}")
                     except ValueError:
-                        logging.error(f"Unable to parse Established BGP Peers: {value}")
+                        logging.error(f"无法解析已建立的 BGP 对等体数: {value}")
 
-            # Detect start of peer table
+            # 识别对等体表格的开始
             if line.strip().startswith("Peer"):
                 in_peer_table = True
                 continue
 
             if in_peer_table:
-                # Detect end of peer table
+                # 识别对等体表格的结束
                 if re.match(r'^[-=]+$', line.strip()):
                     in_peer_table = False
                     continue
 
-                # Parse peer entries
+                # 解析对等体条目
                 match = peer_entry_regex.match(line.strip())
                 if match:
                     peer_ip = match.group('peer_ip')
                     peer_as = int(match.group('peer_as'))
                     state = match.group('state').lower()
 
-                    # Collect all peer AS numbers
+                    # 收集所有peer AS号
                     peer_as_numbers.add(peer_as)
 
                     if state == 'established':
-                        # Only record if AS numbers differ
+                        bgp_info["bgp_established_peers"] += 1  # 确保已建立peer数正确
                         if local_as_number is not None and peer_as != local_as_number:
+                            # Peer AS不同且状态为Established，记录其IP
                             bgp_info["bgp_established_different_as_peers"].append(peer_ip)
-                            logging.debug(f"Detected established BGP peer with different AS: IP={peer_ip}, AS={peer_as}")
+                            logging.debug(f"检测到不同AS且已建立的BGP对等体: IP={peer_ip}, AS={peer_as}")
                     else:
                         bgp_info["bgp_non_established_peers"].append({
                             "peer_ip": peer_ip,
                             "peer_as": peer_as,
                             "state": state.capitalize()
                         })
-                        logging.debug(f"Detected non-established BGP peer: IP={peer_ip}, AS={peer_as}, State={state.capitalize()}")
+                        logging.debug(f"检测到未建立的 BGP 对等体: IP={peer_ip}, AS={peer_as}, 状态={state.capitalize()}")
                 else:
-                    logging.debug(f"Unmatched BGP peer line: {line}")
+                    logging.debug(f"未匹配的 BGP 对等体行: {line}")
 
-        # Determine if this router is a boundary router
+        # 判断是否为边界路由器
         if local_as_number is not None and any(peer_as != local_as_number for peer_as in peer_as_numbers):
             bgp_info["is_boundary_router"] = True
-            logging.info("This router is a boundary router.")
+            logging.info("该路由器是边界路由器。")
         else:
-            logging.info("This router is not a boundary router.")
+            logging.info("该路由器不是边界路由器。")
 
-        # Verify essential BGP information
+        # 判断是否为边界路由器
         if bgp_info["bgp_local_router_id"] and bgp_info["bgp_local_as_number"]:
-            logging.info(f"Extracted BGP Information: {bgp_info}")
+            logging.info(f"提取的 BGP 信息: {bgp_info}")
             return bgp_info
         else:
-            logging.warning("Failed to extract some BGP information from 'display bgp all summary' output.")
+            logging.warning("未能从 'display bgp all summary' 输出中提取部分 BGP 信息。")
             return None
 
-    def parse_display_ip_interface_brief(self, output: str) -> List[Dict[str, Any]]:
+    def parse_display_ip_interface_brief(self, output: str) -> List[Dict[str, str]]:
         """
-        Parse the output of 'display ip interface brief', capture IP and subnet mask, and return structured data.
+        Parse the output of 'display ip interface brief', exclude interfaces with 'unassigned' IP, and return structured data.
 
         :param output: Command output.
         :return: List of interface information dictionaries.
@@ -484,10 +470,10 @@ class RouterManager:
         interfaces = []
         header_found = False
 
-        # Regular expression to match interface lines with subnet mask
+        # Regular expression to match interface lines
         interface_regex = re.compile(
             r'^\s*(?P<interface>\S+)\s+'
-            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3})/(?P<mask>\d{1,2})\s+'
+            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3})/\d{1,2}\s+'  # Modified to capture IP without mask
             r'(?P<physical>up|down)\s+'
             r'(?P<protocol>up|down)\s+'
             r'(?P<vpn>\S+)'
@@ -508,21 +494,13 @@ class RouterManager:
                 match = interface_regex.match(line)
                 if match:
                     ip_address = match.group('ip_address')
-                    mask = int(match.group('mask'))
                     if ip_address.lower() != 'unassigned':
                         iface = match.group('interface')
+                        # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
                         iface_formatted = normalize_interface_name(iface)
-                        try:
-                            network = ipaddress.IPv4Network(f"{ip_address}/{mask}", strict=False)
-                            network_str = str(network)
-                        except ValueError as ve:
-                            logging.error(f"Invalid IP address or mask: {ip_address}/{mask} - {ve}")
-                            network_str = "Invalid"
                         interface_info = {
                             'Interface': iface_formatted,
-                            'IP Address': ip_address,
-                            'Mask': mask,
-                            'Network': network_str,
+                            'IP Address': ip_address,  # Store IP without mask
                             'Physical': match.group('physical'),
                             'Protocol': match.group('protocol'),
                             'VPN': match.group('vpn')
@@ -544,8 +522,6 @@ class RouterManager:
                         interface_info = {
                             'Interface': iface_formatted,
                             'IP Address': 'unassigned',
-                            'Mask': None,
-                            'Network': None,
                             'Physical': unassigned_match.group('physical'),
                             'Protocol': unassigned_match.group('protocol'),
                             'VPN': unassigned_match.group('vpn')
@@ -590,7 +566,7 @@ class RouterManager:
                 match = interface_regex.match(line)
                 if match:
                     iface = match.group('interface')
-                    # Use normalize_interface_name to handle various interface name formats
+                    # Use normalize_interface_name to handle both 'e1/0/0' and 'Ethernet1/0/0' and 'Ethernet 1/0/0'
                     iface_formatted = normalize_interface_name(iface)
                     interfaces.append(iface_formatted)
                     logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
@@ -600,9 +576,6 @@ class RouterManager:
         return interfaces
 
     def connect_and_get_sysnames_and_configs(self):
-        """
-        Establish Telnet connections to all nodes and retrieve their configurations concurrently.
-        """
         nodes = self.telnet_info.get("node", [])
         if not nodes:
             logging.warning("No nodes found in telnet_info.")
@@ -634,9 +607,9 @@ class RouterManager:
 
     def collect_results(self) -> Dict[str, Any]:
         """
-        Collect all results, perform interface matching, and output interface configuration statuses,
-        including OSPF, ISIS, and BGP statuses. Additionally, identify inter-AS links based on
-        network segments and provide recommendations.
+        收集所有结果，执行接口匹配，并输出接口配置状态，包括 OSPF、ISIS 和 BGP 状态。
+        还统计每个自治域中边界路由器的数量并判断其合理性。
+        Additionally, identifies inter-AS links based on BGP peers and interface IPs.
         """
         # 存储接口状态信息
         interface_status = {}
@@ -644,11 +617,10 @@ class RouterManager:
         isis_status = {}
         bgp_info_dict = {}
         as_boundary_router_count = {}  # 按自治域统计边界路由器数量
-        inter_as_links: List[Dict[str, Any]] = []  # List to store inter-AS link details
+        inter_as_links: Set[Tuple[str, str]] = set()  # Set to store unique inter-AS links
 
-        # Temporary mappings for IP addresses and network segments
+        # Temporary mappings for IP addresses
         interface_ip_to_device: Dict[str, str] = {}  # Maps IP to device key
-        interface_network_to_device: Dict[str, str] = {}  # Maps network segment to device key
         peer_ip_to_device: Dict[str, str] = {}  # Maps peer IP to device key
 
         for host_port, sysname in self.telnet_sysnames.items():
@@ -697,14 +669,12 @@ class RouterManager:
                 interface_status[host_port].append(status)
                 logging.info(f"[{host_port}] {status}")
 
-                # Collect interface IPs and networks for inter-AS link identification
+                # Collect interface IPs for inter-AS link identification
                 for iface_info in telnet_interfaces:
-                    if iface_info['Interface'].lower() == iface_formatted_lower and iface_info.get('IP Address') and iface_info.get('Mask') and iface_info.get('Network'):
+                    if iface_info['Interface'].lower() == iface_formatted_lower and iface_info.get('IP Address'):
                         ip = iface_info['IP Address']
-                        network = iface_info['Network']
                         interface_ip_to_device[ip] = host_port
-                        interface_network_to_device[network] = host_port
-                        logging.debug(f"Mapping interface network {network} to device {host_port}")
+                        logging.debug(f"Mapping interface IP {ip} to device {host_port}")
 
             # 判断 OSPF 状态
             if host_port in self.telnet_router_ids:
@@ -745,19 +715,19 @@ class RouterManager:
                     "bgp_total_peers": bgp_total_peers,
                     "bgp_established_peers": bgp_established_peers,
                     "bgp_non_established_peers": bgp_non_established_peers,
-                    "bgp_established_different_as_peers": bgp_established_different_as_peers,  # New field
+                    "bgp_established_different_as_peers": bgp_established_different_as_peers,  # 新增字段
                     "is_boundary_router": is_boundary_router
                 }
 
                 # 统计自治域边界路由器数量
                 if is_boundary_router and isinstance(bgp_local_as_number, int):
-                    as_number = bgp_local_as_number  # Router's local AS number represents its AS
+                    as_number = bgp_local_as_number  # 路由器的本地 AS 号代表其所属的自治域
                     if as_number in as_boundary_router_count:
                         as_boundary_router_count[as_number] += 1
                     else:
                         as_boundary_router_count[as_number] = 1
 
-                # Record BGP status logs
+                # 记录 BGP 状态日志
                 if bgp_info.get("bgp_total_peers", 0) > 0:
                     logging.info(f"[{host_port}] BGP 本地 Router ID: {bgp_local_router_id}")
                     logging.info(f"[{host_port}] BGP 本地 AS Number: {bgp_local_as_number}")
@@ -786,63 +756,18 @@ class RouterManager:
                 }
                 logging.info(f"[{host_port}] BGP 未配置")
 
-        # Identify inter-AS links by matching peer IPs with interface networks
+        # Identify inter-AS links by matching peer IPs with interface IPs
         for peer_ip, device_key in peer_ip_to_device.items():
-            # Retrieve the network of the peer IP
-            try:
-                peer_network = ipaddress.IPv4Interface(f"{peer_ip}/32").network
-                # Since we have the network segments from interfaces, find if any network matches
-                matched_network = None
-                for network, device in interface_network_to_device.items():
-                    if ipaddress.IPv4Address(peer_ip) in ipaddress.IPv4Network(network):
-                        matched_network = network
-                        break
-                if matched_network:
-                    connected_device_key = interface_network_to_device.get(matched_network)
-                    if connected_device_key and device_key != connected_device_key:
-                        # Retrieve AS numbers
-                        from_as = self.telnet_bgp_info.get(device_key, {}).get("bgp_local_as_number")
-                        to_as = self.telnet_bgp_info.get(connected_device_key, {}).get("bgp_local_as_number")
-                        if from_as is None or to_as is None:
-                            logging.warning(f"AS number missing for devices {device_key} or {connected_device_key}. Skipping link via network {matched_network}.")
-                            continue
-                        # Create a consistent AS pair
-                        as_pair = tuple(sorted([from_as, to_as]))
-                        # Define a unique key based on AS pair and network
-                        link_key = (as_pair, matched_network)
-                        if link_key not in self.interface_network_to_device:
-                            link = {
-                                "from_as": as_pair[0],
-                                "to_as": as_pair[1],
-                                "via_network": matched_network
-                            }
-                            inter_as_links.append(link)
-                            logging.info(f"Detected inter-AS link between AS{as_pair[0]} and AS{as_pair[1]} via Network {matched_network}")
-            except ValueError as ve:
-                logging.error(f"Invalid peer IP: {peer_ip} - {ve}")
-                continue
-
-        # Summarize inter-AS links by AS pairs
-        inter_as_link_summary: Dict[Tuple[int, int], int] = {}
-        for link in inter_as_links:
-            as_pair = (link['from_as'], link['to_as'])  # Tuple of AS numbers
-            if as_pair in inter_as_link_summary:
-                inter_as_link_summary[as_pair] += 1
-            else:
-                inter_as_link_summary[as_pair] = 1
-
-        # Prepare the summary list for JSON output
-        inter_as_link_summary_list = [
-            {
-                "from_as": as_pair[0],
-                "to_as": as_pair[1],
-                "link_count": count
-            }
-            for as_pair, count in inter_as_link_summary.items()
-        ]
+            if peer_ip in interface_ip_to_device:
+                connected_device_key = interface_ip_to_device[peer_ip]
+                if device_key != connected_device_key:
+                    # To avoid duplicate links, sort the tuple
+                    link = tuple(sorted([device_key, connected_device_key]))
+                    inter_as_links.add(link)
+                    logging.info(f"Detected inter-AS link between {device_key} and {connected_device_key} via IP {peer_ip}")
 
         inter_as_link_count = len(inter_as_links)
-        logging.info(f"Total unique inter-AS links detected: {inter_as_link_count}")
+        logging.info(f"Total inter-AS links detected: {inter_as_link_count}")
 
         # Prepare the mapping
         mapping = {
@@ -862,24 +787,23 @@ class RouterManager:
                 for host_port, sysname in self.telnet_sysnames.items()
             },
             "network_connections": self.network_connections,
-            "as_boundary_router_count": as_boundary_router_count,  # Statistics of boundary routers per AS
-            "total_nodes": len(self.node_interfaces),  # Total number of nodes
-            "evaluation_per_as": {},  # To be filled later
-            "inter_as_links": inter_as_links,  # List of inter-AS links
-            "inter_as_link_summary": inter_as_link_summary_list  # Summary of inter-AS links
+            "as_boundary_router_count": as_boundary_router_count,  # 按自治域统计边界路由器数量
+            "total_nodes": len(self.node_interfaces),  # 添加总节点数量到结果中
+            "evaluation_per_as": {},  # 初始化，稍后填充
+            "inter_as_link_count": inter_as_link_count  # 新增: Total inter-AS links
         }
 
-        # Generate evaluation information per AS
+        # 生成评估信息按自治域
         evaluation_per_as = {}
         for as_number, count in as_boundary_router_count.items():
             if count < 2:
-                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议增加边界路由器数量。"
+                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议增加边界路由器。"
                 logging.warning(evaluation)
             elif 2 <= count < 5:
                 evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，数量合理。"
                 logging.info(evaluation)
             else:  # count >=5
-                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议减少边界路由器数量。"
+                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议减少边界路由器。"
                 logging.warning(evaluation)
             evaluation_per_as[as_number] = evaluation
 
@@ -888,11 +812,6 @@ class RouterManager:
         return mapping
 
     def read_unl_file(self, lab_id: int):
-        """
-        Read and parse the UNL file based on the given lab_id.
-
-        :param lab_id: The lab ID to locate the UNL file.
-        """
         unl_file_path = f"/opt/unetlab/labs/{lab_id}.unl"
         try:
             with open(unl_file_path, 'r', encoding='utf-8') as f:
@@ -982,10 +901,31 @@ class RouterManager:
 
     def write_interface_status(self, data_txt_path: str, mapping: Dict[str, Any]):
         """
-        写入接口状态和 OSPF/ISIS/BGP 状态到 data.txt，包括 inter-AS 链路和其数量摘要。
+        写入接口状态和 OSPF/ISIS/BGP 状态到 data.txt，格式如下：
+        节点: R3 (192.168.3.117:32899)
+            接口: Ethernet1/0/0接口配置状态: 已配置IP地址, OSPF已配置, ISIS未配置
+            接口: Ethernet1/0/1接口配置状态: 已配置IP地址, OSPF已配置, ISIS未配置
+            ...
+            OSPF 状态: OSPF 配置正常，邻居 Router IDs: 2.2.2.2, 1.1.1.1
+            ISIS 状态: ISIS 配置正常，邻居数量: 1
+            BGP 本地 Router ID: 3.3.3.3
+            BGP 本地 AS Number: 100
+            BGP 总邻居数量: 3
+            BGP 建立状态的邻居数量: 2
+            BGP 未建立状态的邻居:
+                Peer IP: x.x.x.x, AS: y, State: Z
 
-        :param data_txt_path: 输出的 data.txt 文件路径。
-        :param mapping: 结果字典。
+        自治域边界路由器统计:
+            自治域 100 边界路由器数量: 2
+            自治域 200 边界路由器数量: 1
+            ...
+
+        评估:
+            自治域 100 中边界路由器数量为 2，数量合理。
+            自治域 200 中边界路由器数量为 1，建议增加边界路由器。
+        
+        新增内容:
+            inter-AS 链路数量: X
         """
         try:
             with open(data_txt_path, 'w', encoding='utf-8') as f:
@@ -993,8 +933,7 @@ class RouterManager:
                 as_boundary_router_count = mapping.get("as_boundary_router_count", {})
                 evaluation_per_as = mapping.get("evaluation_per_as", {})
                 total_nodes = mapping.get("total_nodes", 0)
-                inter_as_links = mapping.get("inter_as_links", [])  # List of inter-AS links
-                inter_as_link_summary = mapping.get("inter_as_link_summary", [])  # Summary of inter-AS links
+                inter_as_link_count = mapping.get("inter_as_link_count", 0)  # 新增: Total inter-AS links
 
                 for host_port, device_info in telnet_devices.items():
                     sysname = device_info.get("sysname", "未知节点")
@@ -1045,25 +984,8 @@ class RouterManager:
                 # 写入总节点数量
                 f.write(f"\n网络中的总节点数量: {total_nodes}\n")
 
-                # 写入 inter-AS 链路详细信息
-                f.write("\ninter-AS 链路:\n")
-                if inter_as_links:
-                    for link in inter_as_links:
-                        f.write(f"    AS{link['from_as']} <-> AS{link['to_as']} via Network {link['via_network']}\n")
-                else:
-                    f.write("    无 inter-AS 链路检测到。\n")
-
-                # 写入 inter-AS 链路数量摘要
-                f.write("\ninter-AS 链路数量:\n")
-                if inter_as_link_summary:
-                    for summary in inter_as_link_summary:
-                        as1, as2, count = summary['from_as'], summary['to_as'], summary['link_count']
-                        f.write(f"    AS{as1} <-> AS{as2}: {count} 条\n")
-                        # Provide recommendation if only one link exists
-                        if count < 2:
-                            f.write(f"        建议增加自治域 {as1} 和自治域 {as2} 之间的链路。\n")
-                else:
-                    f.write("    无 inter-AS 链路检测到。\n")
+                # 写入 inter-AS 链路数量
+                f.write(f"\ninter-AS 链路数量: {inter_as_link_count}\n")
 
             logging.info(f"接口状态已写入 {data_txt_path}")
         except IOError as e:
@@ -1072,12 +994,6 @@ class RouterManager:
 
 
 def find_latest_folder(base_path: str) -> str:
-    """
-    Find the latest numbered folder within the base path.
-
-    :param base_path: The base directory path.
-    :return: The name of the latest folder.
-    """
     try:
         all_folders = [f for f in os.listdir(base_path) if f.isdigit()]
         if not all_folders:
@@ -1094,12 +1010,6 @@ def find_latest_folder(base_path: str) -> str:
 
 
 def load_telnet_info(input_path: str) -> Dict[str, Any]:
-    """
-    Load telnet information from a JSON file.
-
-    :param input_path: Path to the param.json file.
-    :return: Dictionary containing telnet information.
-    """
     try:
         with open(input_path, 'r', encoding='utf-8') as f:
             telnet_info = json.load(f)
@@ -1114,12 +1024,6 @@ def load_telnet_info(input_path: str) -> Dict[str, Any]:
 
 
 def main(input_path: str, output_path: str):
-    """
-    Main function to orchestrate the router configuration processing.
-
-    :param input_path: Path to the param.json file, may contain {t} for latest folder.
-    :param output_path: Path to the output JSON file, may contain {t} for latest folder.
-    """
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
         latest_folder = find_latest_folder(base_path)

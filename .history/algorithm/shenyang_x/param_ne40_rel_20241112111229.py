@@ -873,13 +873,13 @@ class RouterManager:
         evaluation_per_as = {}
         for as_number, count in as_boundary_router_count.items():
             if count < 2:
-                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议增加边界路由器数量。"
+                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议增加自治域间的链路。"
                 logging.warning(evaluation)
             elif 2 <= count < 5:
                 evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，数量合理。"
                 logging.info(evaluation)
             else:  # count >=5
-                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议减少边界路由器数量。"
+                evaluation = f"自治域 {as_number} 中边界路由器数量为 {count}，建议减少自治域间的链路。"
                 logging.warning(evaluation)
             evaluation_per_as[as_number] = evaluation
 
