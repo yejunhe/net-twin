@@ -1,180 +1,26 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import argparse
 import json
 import os
 import sys
-import telnetlib
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import logging
+from logging.handlers import RotatingFileHandler
+import telnetlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-import logging
-from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, Any
 
 
-# 配置日志记录
-def setup_logging():
-    """配置日志记录"""
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-
-    # 文件处理器，限制日志文件大小为5MB，保留5个备份
-    try:
-        file_handler = RotatingFileHandler("combined_tool.log", maxBytes=5*1024*1024, backupCount=5)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    except Exception as e:
-        print(f"无法创建日志文件处理器。错误信息: {e}")
-        sys.exit(1)
-
-    # 控制台处理器
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-
-class RouterManager:
-    def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
-        self.telnet_info = telnet_info
-        self.telnet_sysnames: Dict[str, str] = {}
-        self.telnet_configurations: Dict[str, str] = {}
-        self.max_workers = max_workers
-        self.telnet_lock = Lock()
-        # Define command sequences for different device types
-        self.commands_map = {
-            "huaweine40": (['scr 0 t', 'display current-configuration'], b'q\n')
-        }
-
-    def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: list, quit_cmd: bytes) -> str:
-        try:
-            tn.write(b'\n')
-            time.sleep(1)
-            output = tn.read_very_eager().decode('ascii', errors='ignore')
-            logging.debug(f"[{tn.host}:{tn.port}] Initial Telnet output:\n{output}")
-
-            for cmd in commands:
-                tn.write(cmd.encode('ascii') + b'\n')
-                logging.info(f"[{tn.host}:{tn.port}] Sending command: {cmd}")
-                time.sleep(1)
-                cmd_output = tn.read_very_eager().decode('ascii', errors='ignore')
-                output += cmd_output
-                logging.debug(f"[{tn.host}:{tn.port}] Output for '{cmd}':\n{cmd_output}")
-
-            prompt = self.get_prompt(tn)
-            if prompt and not (prompt.startswith('<') and prompt.endswith('>')):
-                tn.write(quit_cmd)
-                logging.info(f"[{tn.host}:{tn.port}] Sending quit command.")
-                time.sleep(1)
-                output += tn.read_very_eager().decode('ascii', errors='ignore')
-            return output
-        except Exception as e:
-            logging.error(f"[{tn.host}:{tn.port}] Telnet Error: {e}")
-            return ""
-
-    def get_prompt(self, tn: telnetlib.Telnet) -> Optional[str]:
-        try:
-            time.sleep(1)
-            output = tn.read_very_eager().decode('ascii', errors='ignore')
-            lines = output.splitlines()
-            prompt = lines[-1].strip() if lines else None
-            logging.debug(f"[{tn.host}:{tn.port}] Detected prompt: {prompt}")
-            return prompt
-        except Exception as e:
-            logging.error(f"[{tn.host}:{tn.port}] Error getting prompt: {e}")
-            return None
-
-    def get_sysname_via_telnet(self, tn: telnetlib.Telnet) -> Optional[str]:
-        try:
-            tn.write(b'\n')
-            time.sleep(1)
-            output = tn.read_very_eager().decode('ascii', errors='ignore')
-            for line in output.splitlines():
-                if line.startswith('<') and line.endswith('>'):
-                    sysname = line.strip('<> ').strip()
-                    logging.info(f"[{tn.host}:{tn.port}] Detected sysname: {sysname}")
-                    return sysname
-            logging.warning(f"[{tn.host}:{tn.port}] No sysname detected.")
-            return None
-        except Exception as e:
-            logging.error(f"[{tn.host}:{tn.port}] Telnet Error while getting sysname: {e}")
-            return None
-
-    def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[str]:
-        # Find matching device type based on partial image_type
-        matched_key = next((key for key in self.commands_map if key in image_type), None)
-        if not matched_key:
-            logging.warning(f"[{tn.host}:{tn.port}] Unsupported image_type '{image_type}'. Skipping.")
-            return None
-
-        commands, quit_cmd = self.commands_map[matched_key]
-        output = self.execute_telnet_commands(tn, commands, quit_cmd)
-        if output:
-            sysname = self.get_sysname_via_telnet(tn)
-            if sysname:
-                key = f"{tn.host}:{tn.port}"
-                with self.telnet_lock:
-                    self.telnet_sysnames[key] = sysname
-                    self.telnet_configurations[key] = output
-        else:
-            logging.warning(f"[{tn.host}:{tn.port}] No output received from Telnet commands.")
-        return output
-
-    def connect_and_get_sysnames_and_configs(self):
-        nodes = self.telnet_info.get("node", [])
-        if not nodes:
-            logging.warning("No nodes found in telnet_info.")
-            return
-
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_node = {}
-            for node in nodes:
-                image_type = node.get("image_type", "").lower()
-                if "huaweine40" in image_type:
-                    host, port = node.get("hostip"), node.get("port")
-                    if not host or not port:
-                        logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
-                        continue
-                    try:
-                        tn = telnetlib.Telnet(host, port, timeout=10)
-                        tn.host, tn.port = host, port
-                        future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
-                        future_to_node[future] = node
-                    except Exception as e:
-                        logging.error(f"Failed to connect to {host}:{port} via Telnet: {e}")
-
-            for future in as_completed(future_to_node):
-                node = future_to_node[future]
-                host, port = node.get("hostip"), node.get("port")
-                config = future.result()
-                msg = "successful" if config else "failed"
-                logging.info(f"[{host}:{port}] Configuration retrieval {msg}.")
-
-    def collect_results(self) -> Dict[str, Any]:
-        return {
-            "telnet_devices": {
-                host_port: {"sysname": sysname, "configuration": self.telnet_configurations.get(host_port, 'No config')}
-                for host_port, sysname in self.telnet_sysnames.items()
-            }
-        }
-
-
-class ArgumentParserCustom:
+class ArgumentParser:
     """解析命令行参数"""
 
     def __init__(self):
-        self.parser = argparse.ArgumentParser(description='综合网络管理与拓扑变更检测工具')
-        # Telnet相关参数
-        self.parser.add_argument('-i_telnet', '--input_telnet', required=True, help='Telnet param.json文件的输入路径')
-        self.parser.add_argument('-o_telnet', '--output_telnet', required=True, help='Telnet配置输出路径')
-        # 拓扑检测相关参数
-        self.parser.add_argument('-i_topo', '--input_topology', required=True, help='Topology param.json文件的输入路径')
-        self.parser.add_argument('-o_topo', '--output_topology', required=True, help='拓扑变更结果输出路径')
+        self.parser = argparse.ArgumentParser(description='Eveng平台拓扑变更检测与路由器管理脚本（标准库版）')
+        self.parser.add_argument('-i', '--input', required=True, help='param.json文件的输入路径')
+        self.parser.add_argument('-o', '--output', required=True, help='变更结果和路由器配置信息输出路径')
         self.args = None
 
     def parse(self):
@@ -413,20 +259,21 @@ class TopologyComparator:
 
 
 class OutputWriter:
-    """将检测到的变化内容输出到指定路径"""
+    """将检测到的变化内容和路由器配置信息输出到指定路径"""
 
     def __init__(self, output_path):
         self.output_path = output_path
 
-    def format_diff(self, differences, execution_time, execution_result):
+    def format_diff(self, differences, telnet_results, execution_time, execution_result):
         report_lines = []
         report_lines.append("=" * 50)
-        report_lines.append("拓扑变更检测报告")
+        report_lines.append("拓扑变更检测与路由器配置信息报告")
         report_lines.append(f"执行时间：{execution_time.strftime('%Y-%m-%d %H:%M:%S')}")
         report_lines.append(f"执行结果：{execution_result}")
         report_lines.append("变更内容：")
         report_lines.append("-" * 50)
 
+        # 拓扑变更部分
         if differences is None:
             report_lines.append("首次运行，无历史记录进行比较。")
         elif not differences:
@@ -494,6 +341,19 @@ class OutputWriter:
                         report_lines.append(f"   * {key}: {change['old']} → {change['new']}")
 
         report_lines.append("=" * 50)
+        report_lines.append("路由器配置信息：")
+        report_lines.append("-" * 50)
+
+        if not telnet_results or not telnet_results.get('telnet_devices'):
+            report_lines.append("未收集到任何路由器配置信息。")
+        else:
+            for host_port, info in telnet_results['telnet_devices'].items():
+                report_lines.append(f"设备: {host_port}")
+                report_lines.append(f"  系统名称: {info.get('sysname', 'N/A')}")
+                report_lines.append(f"  配置内容:\n{info.get('configuration', 'N/A')}")
+                report_lines.append("-" * 30)
+
+        report_lines.append("=" * 50)
         return "\n".join(report_lines)
 
     def get_added_interfaces(self, old_interfaces, new_interfaces):
@@ -548,15 +408,142 @@ class OutputWriter:
         try:
             with open(self.output_path, 'w', encoding='utf-8') as f:
                 f.write(content)
-            logging.info(f"变更内容已输出到 {self.output_path}")
-            print(f"变更内容已输出到 {self.output_path}")
+            logging.info(f"变更内容和路由器配置信息已输出到 {self.output_path}")
+            print(f"变更内容和路由器配置信息已输出到 {self.output_path}")
         except Exception as e:
             logging.error(f"无法写入输出文件 {self.output_path}。错误信息: {e}")
             raise IOError(f"无法写入输出文件 {self.output_path}。错误信息: {e}")
 
 
+class RouterManager:
+    """通过Telnet连接路由器，获取系统名称和配置信息"""
+
+    def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
+        self.telnet_info = telnet_info
+        self.telnet_sysnames: Dict[str, str] = {}
+        self.telnet_configurations: Dict[str, str] = {}
+        self.max_workers = max_workers
+        self.telnet_lock = Lock()
+        # 定义不同设备类型的命令序列
+        self.commands_map = {
+            "huaweine40": (['scr 0 t', 'display current-configuration'], b'q\n')
+        }
+
+    def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: list, quit_cmd: bytes) -> str:
+        try:
+            tn.write(b'\n')
+            time.sleep(1)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
+            logging.debug(f"[{tn.host}:{tn.port}] Initial Telnet output:\n{output}")
+
+            for cmd in commands:
+                tn.write(cmd.encode('ascii') + b'\n')
+                logging.info(f"[{tn.host}:{tn.port}] 发送命令: {cmd}")
+                time.sleep(1)
+                cmd_output = tn.read_very_eager().decode('ascii', errors='ignore')
+                output += cmd_output
+                logging.debug(f"[{tn.host}:{tn.port}] 命令 '{cmd}' 的输出:\n{cmd_output}")
+
+            prompt = self.get_prompt(tn)
+            if prompt and not (prompt.startswith('<') and prompt.endswith('>')):
+                tn.write(quit_cmd)
+                logging.info(f"[{tn.host}:{tn.port}] 发送退出命令.")
+                time.sleep(1)
+                output += tn.read_very_eager().decode('ascii', errors='ignore')
+            return output
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] Telnet错误: {e}")
+            return ""
+
+    def get_prompt(self, tn: telnetlib.Telnet) -> Optional[str]:
+        try:
+            time.sleep(1)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
+            lines = output.splitlines()
+            prompt = lines[-1].strip() if lines else None
+            logging.debug(f"[{tn.host}:{tn.port}] 检测到的提示符: {prompt}")
+            return prompt
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] 获取提示符时出错: {e}")
+            return None
+
+    def get_sysname_via_telnet(self, tn: telnetlib.Telnet) -> Optional[str]:
+        try:
+            tn.write(b'\n')
+            time.sleep(1)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
+            for line in output.splitlines():
+                if line.startswith('<') and line.endswith('>'):
+                    sysname = line.strip('<> ').strip()
+                    logging.info(f"[{tn.host}:{tn.port}] 检测到的系统名称: {sysname}")
+                    return sysname
+            logging.warning(f"[{tn.host}:{tn.port}] 未检测到系统名称。")
+            return None
+        except Exception as e:
+            logging.error(f"[{tn.host}:{tn.port}] 获取系统名称时Telnet错误: {e}")
+            return None
+
+    def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[str]:
+        # 根据image_type匹配设备类型
+        matched_key = next((key for key in self.commands_map if key in image_type), None)
+        if not matched_key:
+            logging.warning(f"[{tn.host}:{tn.port}] 不支持的image_type '{image_type}'。跳过。")
+            return None
+
+        commands, quit_cmd = self.commands_map[matched_key]
+        output = self.execute_telnet_commands(tn, commands, quit_cmd)
+        if output:
+            sysname = self.get_sysname_via_telnet(tn)
+            if sysname:
+                key = f"{tn.host}:{tn.port}"
+                with self.telnet_lock:
+                    self.telnet_sysnames[key] = sysname
+                    self.telnet_configurations[key] = output
+        else:
+            logging.warning(f"[{tn.host}:{tn.port}] 未收到Telnet命令的任何输出。")
+        return output
+
+    def connect_and_get_sysnames_and_configs(self):
+        nodes = self.telnet_info.get("node", [])
+        if not nodes:
+            logging.warning("telnet_info中未找到任何节点。")
+            return
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_node = {}
+            for node in nodes:
+                image_type = node.get("image_type", "").lower()
+                if "huaweine40" in image_type:
+                    host, port = node.get("hostip"), node.get("port")
+                    if not host or not port:
+                        logging.warning(f"节点的hostip或port缺失，image_type '{image_type}'。跳过。")
+                        continue
+                    try:
+                        tn = telnetlib.Telnet(host, port, timeout=10)
+                        tn.host, tn.port = host, port
+                        future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
+                        future_to_node[future] = node
+                    except Exception as e:
+                        logging.error(f"无法通过Telnet连接到 {host}:{port}。错误: {e}")
+
+            for future in as_completed(future_to_node):
+                node = future_to_node[future]
+                host, port = node.get("hostip"), node.get("port")
+                config = future.result()
+                msg = "成功" if config else "失败"
+                logging.info(f"[{host}:{port}] 配置获取 {msg}。")
+
+    def collect_results(self) -> Dict[str, Any]:
+        return {
+            "telnet_devices": {
+                host_port: {"sysname": sysname, "configuration": self.telnet_configurations.get(host_port, 'No config')}
+                for host_port, sysname in self.telnet_sysnames.items()
+            }
+        }
+
+
 class TopologyChangeDetector:
-    """主控制类，协调各个组件完成拓扑变更检测"""
+    """主控制类，协调各个组件完成拓扑变更检测和路由器管理"""
 
     def __init__(self, input_path, output_path):
         self.input_path = input_path
@@ -565,6 +552,7 @@ class TopologyChangeDetector:
     def run(self):
         start_time = datetime.now()
         execution_result = "成功"
+        telnet_results = {}
 
         try:
             # 读取param.json
@@ -587,9 +575,18 @@ class TopologyChangeDetector:
             comparator = TopologyComparator(current_json, history_json)
             differences = comparator.compare()
 
-            # 格式化比较结果
+            # 路由器管理部分
+            telnet_info = param.get('telnet_info', {})
+            if telnet_info:
+                router_manager = RouterManager(telnet_info)
+                router_manager.connect_and_get_sysnames_and_configs()
+                telnet_results = router_manager.collect_results()
+            else:
+                logging.info("param.json 中未提供 'telnet_info'，跳过路由器管理。")
+
+            # 格式化比较结果和路由器配置信息
             output_writer = OutputWriter(self.output_path)
-            formatted_diff = output_writer.format_diff(differences, start_time, execution_result)
+            formatted_diff = output_writer.format_diff(differences, telnet_results, start_time, execution_result)
 
             # 写入输出文件
             output_writer.write_output(formatted_diff)
@@ -605,14 +602,14 @@ class TopologyChangeDetector:
                 OutputWriter(self.output_path).write_output(formatted_diff)
             except Exception as write_error:
                 logging.error(f"无法写入错误报告到 {self.output_path}。错误信息: {write_error}")
-            logging.error(f"拓扑变更检测运行失败。错误信息: {e}")
+            logging.error(f"脚本运行失败。错误信息: {e}")
             print(f"错误: {e}")
             sys.exit(1)
 
     def format_error_report(self, start_time, end_time, error_message):
         report_lines = []
         report_lines.append("=" * 50)
-        report_lines.append("拓扑变更检测报告")
+        report_lines.append("拓扑变更检测与路由器配置信息报告")
         report_lines.append(f"执行时间：{start_time.strftime('%Y-%m-%d %H:%M:%S')} 至 {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
         report_lines.append("执行结果：失败")
         report_lines.append("变更内容：")
@@ -622,44 +619,26 @@ class TopologyChangeDetector:
         return "\n".join(report_lines)
 
 
-def find_latest_folder(base_path: str) -> str:
+def setup_logging():
+    """配置日志记录"""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+
+    # 文件处理器，限制日志文件大小为5MB，保留5个备份
     try:
-        all_folders = [f for f in os.listdir(base_path) if f.isdigit()]
-        if not all_folders:
-            raise ValueError("No numbered folders found in the base path.")
-        latest_folder = max(all_folders, key=int)
-        logging.info(f"Latest folder identified: {latest_folder}")
-        return latest_folder
-    except FileNotFoundError:
-        logging.error(f"Base path not found: {base_path}")
-        sys.exit(1)
-    except ValueError as ve:
-        logging.error(ve)
+        file_handler = RotatingFileHandler("topology_change_detector.log", maxBytes=5*1024*1024, backupCount=5)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except Exception as e:
+        print(f"无法创建日志文件处理器。错误信息: {e}")
         sys.exit(1)
 
-
-def load_telnet_info(input_path: str) -> Dict[str, Any]:
-    try:
-        with open(input_path, 'r') as f:
-            telnet_info = json.load(f)
-        logging.info(f"Successfully loaded telnet_info from {input_path}")
-        return telnet_info
-    except FileNotFoundError:
-        logging.error(f"param.json file not found at path: {input_path}")
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        logging.error(f"Error decoding JSON from param.json: {e}")
-        sys.exit(1)
-
-
-def write_output_telnet(output_path: str, data: Dict[str, Any]):
-    try:
-        with open(output_path, 'w') as f:
-            json.dump(data, f, indent=4)
-        logging.info(f"Telnet mapping results written to {output_path}")
-    except IOError as e:
-        logging.error(f"Error writing to Telnet output file: {e}")
-        sys.exit(1)
+    # 控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
 
 
 def main():
@@ -667,43 +646,12 @@ def main():
     setup_logging()
 
     # 解析命令行参数
-    arg_parser = ArgumentParserCustom()
+    arg_parser = ArgumentParser()
     args = arg_parser.parse()
 
-    # 处理Telnet相关功能
-    telnet_base_path = "/uploadPath/reasoning"
-    input_telnet = args.input_telnet
-    output_telnet = args.output_telnet
-
-    if "{t}" in input_telnet or "{t}" in output_telnet:
-        latest_folder = find_latest_folder(telnet_base_path)
-        input_telnet = input_telnet.replace("{t}", latest_folder)
-        output_telnet = output_telnet.replace("{t}", latest_folder)
-        logging.debug(f"Resolved input_telnet: {input_telnet}")
-        logging.debug(f"Resolved output_telnet: {output_telnet}")
-
-    telnet_info = load_telnet_info(input_telnet)
-    router_manager = RouterManager(telnet_info)
-    router_manager.connect_and_get_sysnames_and_configs()
-    telnet_mapping = router_manager.collect_results()
-
-    logging.info("Collected router configurations:")
-    logging.info(json.dumps(telnet_mapping, indent=4))
-    write_output_telnet(output_telnet, telnet_mapping)
-
-    # 处理拓扑变更检测功能
-    input_topo = args.input_topology
-    output_topo = args.output_topology
-
-    if "{t}" in input_topo or "{t}" in output_topo:
-        latest_folder = find_latest_folder(telnet_base_path)  # 假设使用相同的最新文件夹
-        input_topo = input_topo.replace("{t}", latest_folder)
-        output_topo = output_topo.replace("{t}", latest_folder)
-        logging.debug(f"Resolved input_topo: {input_topo}")
-        logging.debug(f"Resolved output_topo: {output_topo}")
-
-    topo_detector = TopologyChangeDetector(input_topo, output_topo)
-    topo_detector.run()
+    # 运行拓扑变更检测与路由器管理
+    detector = TopologyChangeDetector(args.input, args.output)
+    detector.run()
 
 
 if __name__ == "__main__":

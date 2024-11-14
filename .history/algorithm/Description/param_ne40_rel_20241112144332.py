@@ -463,6 +463,7 @@ class RouterManager:
             bgp_info["is_boundary_router"] = True
             logging.info("This router is a boundary router.")
         else:
+            bgp_info["is_boundary_router"] = False
             logging.info("This router is not a boundary router.")
 
         # Verify essential BGP information
@@ -980,6 +981,21 @@ class RouterManager:
             logging.error(f"Error writing to output file: {e}")
             sys.exit(1)
 
+    def write_tmp(self, tmp_txt_path: str, mapping: Dict[str, Any]):
+        """
+        将 Mapping results 写入 tmp.txt 文件。
+
+        :param tmp_txt_path: tmp.txt 文件路径。
+        :param mapping: 结果字典。
+        """
+        try:
+            with open(tmp_txt_path, 'w', encoding='utf-8') as f:
+                json.dump(mapping, f, indent=4, ensure_ascii=False)  # 使用 JSON 格式写入
+            logging.info(f"Mapping results written to {tmp_txt_path}")
+        except IOError as e:
+            logging.error(f"Error writing to tmp.txt file: {e}")
+            sys.exit(1)
+
     def write_interface_status(self, data_txt_path: str, mapping: Dict[str, Any]):
         """
         写入接口状态和 OSPF/ISIS/BGP 状态到 data.txt，包括 inter-AS 链路和其数量摘要。
@@ -1145,8 +1161,12 @@ def main(input_path: str, output_path: str):
     logging.info(json.dumps(mapping, indent=4, ensure_ascii=False))
     router_manager.write_output(output_path, mapping)
 
-    # 定义 data.txt 的路径，放在 output_path 的同一目录下
+    # 定义 tmp.txt 的路径，放在 output_path 的同一目录下
     output_dir = os.path.dirname(output_path)
+    tmp_txt_path = os.path.join(output_dir, "tmp.txt")
+    router_manager.write_tmp(tmp_txt_path, mapping)
+
+    # 定义 data.txt 的路径，放在 output_path 的同一目录下
     data_txt_path = os.path.join(output_dir, "data.txt")
     router_manager.write_interface_status(data_txt_path, mapping)
 
@@ -1166,7 +1186,4 @@ if __name__ == "__main__":
             logging.FileHandler("router_manager.log", encoding='utf-8')
         ]
     )
-        # Disable all logging messages
-    # logging.disable(logging.CRITICAL)
-
     main(args.input, args.output)

@@ -463,6 +463,7 @@ class RouterManager:
             bgp_info["is_boundary_router"] = True
             logging.info("This router is a boundary router.")
         else:
+            bgp_info["is_boundary_router"] = False
             logging.info("This router is not a boundary router.")
 
         # Verify essential BGP information
@@ -1166,7 +1167,4 @@ if __name__ == "__main__":
             logging.FileHandler("router_manager.log", encoding='utf-8')
         ]
     )
-        # Disable all logging messages
-    # logging.disable(logging.CRITICAL)
-
     main(args.input, args.output)

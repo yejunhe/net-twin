@@ -1166,7 +1166,4 @@ if __name__ == "__main__":
             logging.FileHandler("router_manager.log", encoding='utf-8')
         ]
     )
-        # Disable all logging messages
-    # logging.disable(logging.CRITICAL)
-
     main(args.input, args.output)

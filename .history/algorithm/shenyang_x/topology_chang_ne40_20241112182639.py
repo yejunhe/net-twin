@@ -15,29 +15,27 @@ from datetime import datetime
 
 # 配置统一的日志记录
 def setup_logging():
+    """配置日志记录"""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)  # 修改为INFO以捕捉INFO及更高级别的日志
 
-    logging.disable(logging.CRITICAL)
-    # """配置日志记录"""
-    # logger = logging.getLogger()
-    # logger.setLevel(logging.INFO)  # 修改为INFO以捕捉INFO及更高级别的日志
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
 
-    # formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    # 文件处理器，限制日志文件大小为5MB，保留5个备份
+    try:
+        file_handler = RotatingFileHandler("combined_script.log", maxBytes=5*1024*1024, backupCount=5)
+        file_handler.setLevel(logging.DEBUG)  # 保持文件中记录所有级别的日志
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except Exception as e:
+        print(f"无法创建日志文件处理器。错误信息: {e}")
+        sys.exit(1)
 
-    # # 文件处理器，限制日志文件大小为5MB，保留5个备份
-    # try:
-    #     file_handler = RotatingFileHandler("combined_script.log", maxBytes=5*1024*1024, backupCount=5)
-    #     file_handler.setLevel(logging.DEBUG)  # 保持文件中记录所有级别的日志
-    #     file_handler.setFormatter(formatter)
-    #     logger.addHandler(file_handler)
-    # except Exception as e:
-    #     print(f"无法创建日志文件处理器。错误信息: {e}")
-    #     sys.exit(1)
-
-    # # 控制台处理器
-    # console_handler = logging.StreamHandler(sys.stdout)
-    # console_handler.setLevel(logging.INFO)  # 仅在控制台显示INFO及更高级别的日志
-    # console_handler.setFormatter(formatter)
-    # logger.addHandler(console_handler)
+    # 控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)  # 仅在控制台显示INFO及更高级别的日志
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
 
 # 调用日志配置
 setup_logging()
