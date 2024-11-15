@@ -82,7 +82,7 @@ class RouterManager:
                     'display ospf peer',
                     'display isis interface',
                     'display isis peer',
-                    'display bgp all summary'
+                    'display bgp peer'  # Changed from 'display bgp all summary' to 'display bgp peer'
                 ],
                 b'q\n'
             )
@@ -252,14 +252,14 @@ class RouterManager:
                     else:
                         logging.warning(f"[{tn.host}:{tn.port}] Missing 'display isis peer' output.")
 
-                    # Parse 'display bgp all summary'
-                    if 'display bgp all summary' in command_outputs:
-                        bgp_output = command_outputs['display bgp all summary']
-                        bgp_info = self.parse_display_bgp_all_summary(bgp_output)
+                    # Parse 'display bgp peer'  # Updated to new command
+                    if 'display bgp peer' in command_outputs:
+                        bgp_output = command_outputs['display bgp peer']
+                        bgp_info = self.parse_display_bgp_peer(bgp_output)
                         if bgp_info:
                             self.telnet_bgp_info[key] = bgp_info
                     else:
-                        logging.warning(f"[{tn.host}:{tn.port}] Missing 'display bgp all summary' output.")
+                        logging.warning(f"[{tn.host}:{tn.port}] Missing 'display bgp peer' output.")
         else:
             logging.warning(f"[{tn.host}:{tn.port}] No output received from Telnet commands.")
         return command_outputs
@@ -362,13 +362,12 @@ class RouterManager:
         logging.debug(f"Parsed ISIS interfaces: {interfaces}")
         return interfaces
 
-    def parse_display_bgp_all_summary(self, output: str) -> Optional[Dict[str, Any]]:
+    def parse_display_bgp_peer(self, output: str) -> Optional[Dict[str, Any]]:
         """
-        解析 'display bgp all summary' 命令的输出，提取 BGP 信息并根据 AS 号比较判断路由器是否为边界路由器。
+        Parse the output of 'display bgp peer' to extract BGP information and determine if it's a boundary router.
 
-        :param output: 命令输出。
-        :return: 包含 BGP 本地 Router ID、本地 AS 号、总对等体数、已建立对等体数、未建立对等体列表、
-                Established peers with different AS、边界路由器标志的字典。如果解析失败，则返回 None。
+        :param output: Output of the command.
+        :return: Dictionary containing BGP information. Returns None if parsing fails.
         """
         bgp_info = {
             "bgp_local_router_id": None,
@@ -381,18 +380,20 @@ class RouterManager:
         }
 
         lines = output.splitlines()
-        logging.debug("解析 'display bgp all summary' 输出。")
+        logging.debug("Parsing 'display bgp peer' output.")
 
         # Define regex patterns
         key_value_regex = re.compile(r'(\w+(?:\s+\w+)*)\s*:\s*([\d\.]+)', re.IGNORECASE)
         peer_entry_regex = re.compile(
             r'^(?P<peer_ip>\S+)\s+'
+            r'(?P<V>\d+)\s+'
             r'(?P<peer_as>\d+)\s+'
             r'(?P<msg_rcvd>\d+)\s+'
             r'(?P<msg_sent>\d+)\s+'
             r'(?P<out_q>\d+)\s+'
             r'(?P<up_down>\S+)\s+'
-            r'(?P<state>\S+)', re.IGNORECASE
+            r'(?P<state>\S+)\s+'
+            r'(?P<pref_rcv>\d+)', re.IGNORECASE
         )
 
         local_as_number = None
@@ -401,6 +402,7 @@ class RouterManager:
         in_peer_table = False  # Flag to indicate if parsing peer table
 
         for line in lines:
+            line = line.strip()
             # Extract key-value pairs
             key_value_matches = key_value_regex.findall(line)
             for key, value in key_value_matches:
@@ -429,18 +431,18 @@ class RouterManager:
                         logging.error(f"Unable to parse Established BGP Peers: {value}")
 
             # Detect start of peer table
-            if line.strip().startswith("Peer"):
+            if line.startswith("Peer") and "V" in line and "AS" in line:
                 in_peer_table = True
                 continue
 
             if in_peer_table:
                 # Detect end of peer table
-                if re.match(r'^[-=]+$', line.strip()):
+                if re.match(r'^[-=]+$', line):
                     in_peer_table = False
                     continue
 
                 # Parse peer entries
-                match = peer_entry_regex.match(line.strip())
+                match = peer_entry_regex.match(line)
                 if match:
                     peer_ip = match.group('peer_ip')
                     peer_as = int(match.group('peer_as'))
@@ -476,7 +478,237 @@ class RouterManager:
             logging.info(f"Extracted BGP Information: {bgp_info}")
             return bgp_info
         else:
-            logging.warning("Failed to extract some BGP information from 'display bgp all summary' output.")
+            logging.warning("Failed to extract some BGP information from 'display bgp peer' output.")
+            return None
+
+    def parse_display_ip_interface_brief(self, output: str) -> List[Dict[str, Any]]:
+        """
+        Parse the output of 'display ip interface brief', capture IP and subnet mask, and return structured data.
+
+        :param output: Command output.
+        :return: List of interface information dictionaries.
+        """
+        lines = output.splitlines()
+        interfaces = []
+        header_found = False
+
+        # Regular expression to match interface lines with subnet mask
+        interface_regex = re.compile(
+            r'^\s*(?P<interface>\S+)\s+'
+            r'(?P<ip_address>(?:\d{1,3}\.){3}\d{1,3})/(?P<mask>\d{1,2})\s+'
+            r'(?P<physical>up|down)\s+'
+            r'(?P<protocol>up|down)\s+'
+            r'(?P<vpn>\S+)'
+        )
+
+        # Define interfaces to exclude
+        excluded_interfaces = {"Ethernet1/0/0.192"}
+
+        for line in lines:
+            # Look for table header
+            if not header_found:
+                if re.match(r'^Interface\s+IP Address/Mask\s+Physical\s+Protocol\s+VPN', line):
+                    header_found = True
+                    logging.debug("Found 'display ip interface brief' table header.")
+                continue
+            else:
+                # Skip empty lines or separator lines
+                if not line.strip() or re.match(r'^[-=]+$', line):
+                    continue
+
+                match = interface_regex.match(line)
+                if match:
+                    iface = match.group('interface')
+                    iface_formatted = normalize_interface_name(iface)
+                    if iface_formatted in excluded_interfaces:
+                        logging.debug(f"Skipping excluded interface: {iface_formatted}")
+                        continue  # Skip excluded interfaces
+
+                    ip_address = match.group('ip_address')
+                    mask = int(match.group('mask'))
+
+                    if ip_address.lower() != 'unassigned':
+                        try:
+                            network = ipaddress.IPv4Network(f"{ip_address}/{mask}", strict=False)
+                            network_str = str(network)
+                        except ValueError as ve:
+                            logging.error(f"Invalid IP address or mask: {ip_address}/{mask} - {ve}")
+                            network_str = "Invalid"
+                        interface_info = {
+                            'Interface': iface_formatted,
+                            'IP Address': ip_address,
+                            'Mask': mask,
+                            'Network': network_str,
+                            'Physical': match.group('physical'),
+                            'Protocol': match.group('protocol'),
+                            'VPN': match.group('vpn')
+                        }
+                        interfaces.append(interface_info)
+                        logging.debug(f"Parsed interface: {interface_info}")
+                else:
+                    # Handle 'unassigned' IPs by skipping
+                    continue
+
+        logging.debug(f"Parsed Telnet interfaces: {interfaces}")
+        return interfaces
+
+    def parse_display_ospf_interface(self, output: str) -> List[str]:
+        """
+        Parse the output of 'display ospf interface' to extract OSPF-configured interfaces.
+
+        :param output: Command output.
+        :return: List of OSPF-configured interface names in standardized format.
+        """
+        interfaces = []
+        lines = output.splitlines()
+        parsing = False  # Flag to indicate if parsing has started
+
+        # Regular expression to match interface lines
+        interface_regex = re.compile(r'^\s*(?P<interface>\S+)\s+[\d\.]+')
+
+        for line in lines:
+            if "Interfaces" in line:
+                parsing = True
+                logging.debug("Starting to parse OSPF interface information.")
+                continue
+            if parsing:
+                # Skip empty lines and separator lines
+                if not line.strip() or re.match(r'^[-=]+$', line):
+                    continue
+                # Skip lines that do not start with a valid interface name
+                if line.strip().startswith("Area"):
+                    continue
+
+                # Match interface lines
+                match = interface_regex.match(line)
+                if match:
+                    iface = match.group('interface')
+                    # Use normalize_interface_name to handle various interface name formats
+                    iface_formatted = normalize_interface_name(iface)
+                    interfaces.append(iface_formatted)
+                    logging.debug(f"Formatted OSPF interface name: {iface_formatted}")
+                else:
+                    logging.debug(f"Unmatched OSPF interface line: {line}")
+        logging.debug(f"Parsed OSPF interfaces: {interfaces}")
+        return interfaces
+
+    def parse_display_bgp_peer(self, output: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse the output of 'display bgp peer' to extract BGP information and determine if it's a boundary router.
+
+        :param output: Output of the command.
+        :return: Dictionary containing BGP information. Returns None if parsing fails.
+        """
+        bgp_info = {
+            "bgp_local_router_id": None,
+            "bgp_local_as_number": None,
+            "bgp_total_peers": 0,
+            "bgp_established_peers": 0,
+            "bgp_non_established_peers": [],
+            "bgp_established_different_as_peers": [],  # Established peers with different AS
+            "is_boundary_router": False  # Flag indicating if it's a boundary router
+        }
+
+        lines = output.splitlines()
+        logging.debug("Parsing 'display bgp peer' output.")
+
+        # Define regex patterns
+        key_value_regex = re.compile(r'(\w+(?:\s+\w+)*)\s*:\s*([\d\.]+)', re.IGNORECASE)
+        peer_entry_regex = re.compile(
+            r'^(?P<peer_ip>\S+)\s+'
+            r'(?P<V>\d+)\s+'
+            r'(?P<peer_as>\d+)\s+'
+            r'(?P<msg_rcvd>\d+)\s+'
+            r'(?P<msg_sent>\d+)\s+'
+            r'(?P<out_q>\d+)\s+'
+            r'(?P<up_down>\S+)\s+'
+            r'(?P<state>\S+)\s+'
+            r'(?P<pref_rcv>\d+)', re.IGNORECASE
+        )
+
+        local_as_number = None
+        peer_as_numbers = set()
+        inter_as_established_peers: List[str] = []  # List to store inter-AS established peer IPs
+        in_peer_table = False  # Flag to indicate if parsing peer table
+
+        for line in lines:
+            line = line.strip()
+            # Extract key-value pairs
+            key_value_matches = key_value_regex.findall(line)
+            for key, value in key_value_matches:
+                key = key.strip().lower()
+                if key == 'bgp local router id':
+                    bgp_info["bgp_local_router_id"] = value
+                    logging.debug(f"Detected BGP Local Router ID: {bgp_info['bgp_local_router_id']}")
+                elif key == 'local as number':
+                    try:
+                        local_as_number = int(value)
+                        bgp_info["bgp_local_as_number"] = local_as_number
+                        logging.debug(f"Detected Local AS Number: {bgp_info['bgp_local_as_number']}")
+                    except ValueError:
+                        logging.error(f"Unable to parse Local AS Number: {value}")
+                elif key == 'total number of peers':
+                    try:
+                        bgp_info["bgp_total_peers"] = int(value)
+                        logging.debug(f"Detected Total BGP Peers: {bgp_info['bgp_total_peers']}")
+                    except ValueError:
+                        logging.error(f"Unable to parse Total BGP Peers: {value}")
+                elif key == 'peers in established state':
+                    try:
+                        bgp_info["bgp_established_peers"] = int(value)
+                        logging.debug(f"Detected Established BGP Peers: {bgp_info['bgp_established_peers']}")
+                    except ValueError:
+                        logging.error(f"Unable to parse Established BGP Peers: {value}")
+
+            # Detect start of peer table
+            if line.startswith("Peer") and "V" in line and "AS" in line:
+                in_peer_table = True
+                continue
+
+            if in_peer_table:
+                # Detect end of peer table
+                if re.match(r'^[-=]+$', line):
+                    in_peer_table = False
+                    continue
+
+                # Parse peer entries
+                match = peer_entry_regex.match(line)
+                if match:
+                    peer_ip = match.group('peer_ip')
+                    peer_as = int(match.group('peer_as'))
+                    state = match.group('state').lower()
+
+                    # Collect all peer AS numbers
+                    peer_as_numbers.add(peer_as)
+
+                    if state == 'established':
+                        # Only record if AS numbers differ
+                        if local_as_number is not None and peer_as != local_as_number:
+                            bgp_info["bgp_established_different_as_peers"].append(peer_ip)
+                            logging.debug(f"Detected established BGP peer with different AS: IP={peer_ip}, AS={peer_as}")
+                    else:
+                        bgp_info["bgp_non_established_peers"].append({
+                            "peer_ip": peer_ip,
+                            "peer_as": peer_as,
+                            "state": state.capitalize()
+                        })
+                        logging.debug(f"Detected non-established BGP peer: IP={peer_ip}, AS={peer_as}, State={state.capitalize()}")
+                else:
+                    logging.debug(f"Unmatched BGP peer line: {line}")
+
+        # Determine if this router is a boundary router
+        if local_as_number is not None and any(peer_as != local_as_number for peer_as in peer_as_numbers):
+            bgp_info["is_boundary_router"] = True
+            logging.info("This router is a boundary router.")
+        else:
+            logging.info("This router is not a boundary router.")
+
+        # Verify essential BGP information
+        if bgp_info["bgp_local_router_id"] and bgp_info["bgp_local_as_number"]:
+            logging.info(f"Extracted BGP Information: {bgp_info}")
+            return bgp_info
+        else:
+            logging.warning("Failed to extract some BGP information from 'display bgp peer' output.")
             return None
 
     def parse_display_ip_interface_brief(self, output: str) -> List[Dict[str, Any]]:
@@ -878,8 +1110,6 @@ class RouterManager:
 
         return mapping
 
-
-
     def write_output(self, output_path: str, mapping: Dict[str, Any]):
         """
         将结果写入输出的 JSON 文件。
@@ -975,8 +1205,6 @@ class RouterManager:
             sys.exit(1)
 
 
-
-
 def find_latest_folder(base_path: str) -> str:
     """
     Find the latest numbered folder within the base path.
@@ -1019,7 +1247,6 @@ def load_telnet_info(input_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-#def main(input_path: str, output_path: str):
 def main(input_path: str, output_path: str, log_level: str):
     """
     Main function to orchestrate the router configuration processing.
@@ -1063,5 +1290,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args.input, args.output, args.log_level)
-
-   # main(args.input, args.output)

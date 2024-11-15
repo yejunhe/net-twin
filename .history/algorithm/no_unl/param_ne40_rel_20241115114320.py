@@ -1019,7 +1019,7 @@ def load_telnet_info(input_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-#def main(input_path: str, output_path: str):
+def main(input_path: str, output_path: str):
 def main(input_path: str, output_path: str, log_level: str):
     """
     Main function to orchestrate the router configuration processing.
@@ -1058,10 +1058,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process router configurations from param.json.")
     parser.add_argument("-i", "--input", required=True, help="Path to param.json, use {t} for latest folder number.")
     parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
-    
-    parser.add_argument("--log-level", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level (default: INFO).")
-
     args = parser.parse_args()
-    main(args.input, args.output, args.log_level)
 
-   # main(args.input, args.output)
+    # Configure logging to include file handler
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler("router_manager.log", encoding='utf-8')
+        ]
+    )
+        # Disable all logging messages
+    # logging.disable(logging.CRITICAL)
+
+    main(args.input, args.output)

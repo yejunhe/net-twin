@@ -12,17 +12,6 @@ import re
 import ipaddress  # Import for network calculations
 
 
-def setup_logging(log_level: str):
-    numeric_level = getattr(logging, log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        print(f"Invalid log level: {log_level}")
-        sys.exit(1)
-    logging.basicConfig(
-        level=numeric_level,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-
 def normalize_interface_name(interface_name: str) -> str:
     """
     标准化接口名称，将不同格式（如'e1/0/0'、'E1/0/0'、'Eth1/0/0'、'Ethernet1/0/0'、'Ethernet 1/0/0'）转换为统一格式'Ethernet1/0/0'。
@@ -1019,15 +1008,13 @@ def load_telnet_info(input_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
 
-#def main(input_path: str, output_path: str):
-def main(input_path: str, output_path: str, log_level: str):
+def main(input_path: str, output_path: str):
     """
     Main function to orchestrate the router configuration processing.
 
     :param input_path: Path to the param.json file, may contain {t} for latest folder.
     :param output_path: Path to the output JSON file, may contain {t} for latest folder.
     """
-    setup_logging(log_level)
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
         latest_folder = find_latest_folder(base_path)
@@ -1058,10 +1045,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process router configurations from param.json.")
     parser.add_argument("-i", "--input", required=True, help="Path to param.json, use {t} for latest folder number.")
     parser.add_argument("-o", "--output", required=True, help="Output path for process information, use {t} for latest folder number.")
-    
-    parser.add_argument("--log-level", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level (default: INFO).")
-
     args = parser.parse_args()
-    main(args.input, args.output, args.log_level)
 
-   # main(args.input, args.output)
+    # Configure logging to include file handler
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler("router_manager.log", encoding='utf-8')
+        ]
+    )
+        # Disable all logging messages
+    # logging.disable(logging.CRITICAL)
+
+    main(args.input, args.output)

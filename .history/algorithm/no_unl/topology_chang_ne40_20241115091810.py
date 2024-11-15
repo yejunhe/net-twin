@@ -8,27 +8,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import logging
 from typing import Optional, Dict, Any, List
-import ipaddress  # For subnet calculations
-import re
 
 # Configure logging for better traceability and control
-def setup_logging(log_level: str):
-    numeric_level = getattr(logging, log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        print(f"Invalid log level: {log_level}")
-        sys.exit(1)
-    logging.basicConfig(
-        level=numeric_level,
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 class RouterManager:
-    def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20, retry_attempts: int = 3, retry_delay: int = 5):
+    def __init__(self, telnet_info: Dict[str, Any], max_workers: int = 20):
         self.telnet_info = telnet_info
         self.max_workers = max_workers
-        self.retry_attempts = retry_attempts
-        self.retry_delay = retry_delay
         self.telnet_lock = Lock()
         # Define command sequences for different device types
         self.commands_map = {
@@ -38,65 +29,33 @@ class RouterManager:
         self.telnet_sysnames: Dict[str, str] = {}
         self.telnet_filtered_routing_tables: Dict[str, List[Dict[str, Any]]] = {}
         self.telnet_interfaces: Dict[str, List[Dict[str, Any]]] = {}
-    
+
     def execute_telnet_commands(self, tn: telnetlib.Telnet, commands: list, quit_cmd: bytes) -> str:
-        output = ""
         try:
             tn.write(b'\n')
-            logging.debug(f"[{tn.host}:{tn.port}] Sent initial newline.")
-            # Wait for the initial prompt
-            initial_output = self.read_until_prompt(tn)
-            output += initial_output
-            logging.debug(f"[{tn.host}:{tn.port}] Initial Telnet output:\n{initial_output}")
-    
+            time.sleep(1)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
+            logging.debug(f"[{tn.host}:{tn.port}] Initial Telnet output:\n{output}")
+
             for cmd in commands:
                 tn.write(cmd.encode('ascii') + b'\n')
                 logging.info(f"[{tn.host}:{tn.port}] Sending command: {cmd}")
-                # Wait for command execution
-                cmd_output = self.read_until_prompt(tn)
+                time.sleep(1)
+                cmd_output = tn.read_very_eager().decode('ascii', errors='ignore')
                 output += cmd_output
                 logging.debug(f"[{tn.host}:{tn.port}] Output for '{cmd}':\n{cmd_output}")
-    
-            # Send quit command if necessary
+
             prompt = self.get_prompt(tn)
             if prompt and not (prompt.startswith('<') and prompt.endswith('>')):
                 tn.write(quit_cmd)
                 logging.info(f"[{tn.host}:{tn.port}] Sending quit command.")
-                quit_output = self.read_until_prompt(tn)
-                output += quit_output
-                logging.debug(f"[{tn.host}:{tn.port}] Output after quit command:\n{quit_output}")
+                time.sleep(1)
+                output += tn.read_very_eager().decode('ascii', errors='ignore')
             return output
         except Exception as e:
-            logging.error(f"[{tn.host}:{tn.port}] Telnet Error during command execution: {e}")
-            return output
-    
-    def read_until_prompt(self, tn: telnetlib.Telnet, timeout: int = 30) -> str:
-        """
-        Reads from the Telnet session until the prompt is detected or timeout occurs.
-        """
-        end_time = time.time() + timeout
-        output = ""
-        prompt_pattern = re.compile(r'<.*?>')  # Adjust based on actual prompt pattern
-    
-        while time.time() < end_time:
-            try:
-                chunk = tn.read_very_eager().decode('ascii', errors='ignore')
-                if chunk:
-                    output += chunk
-                    logging.debug(f"[{tn.host}:{tn.port}] Received chunk:\n{chunk}")
-                    if prompt_pattern.search(chunk):
-                        logging.debug(f"[{tn.host}:{tn.port}] Detected prompt in output.")
-                        break
-                else:
-                    time.sleep(1)
-            except EOFError:
-                logging.error(f"[{tn.host}:{tn.port}] Connection closed by remote host.")
-                break
-            except Exception as e:
-                logging.error(f"[{tn.host}:{tn.port}] Error reading from Telnet: {e}")
-                break
-        return output
-    
+            logging.error(f"[{tn.host}:{tn.port}] Telnet Error: {e}")
+            return ""
+
     def get_prompt(self, tn: telnetlib.Telnet) -> Optional[str]:
         try:
             time.sleep(1)
@@ -108,13 +67,12 @@ class RouterManager:
         except Exception as e:
             logging.error(f"[{tn.host}:{tn.port}] Error getting prompt: {e}")
             return None
-    
+
     def get_sysname_via_telnet(self, tn: telnetlib.Telnet) -> Optional[str]:
         try:
             tn.write(b'\n')
-            logging.debug(f"[{tn.host}:{tn.port}] Sent newline for sysname retrieval.")
             time.sleep(1)
-            output = self.read_until_prompt(tn)
+            output = tn.read_very_eager().decode('ascii', errors='ignore')
             for line in output.splitlines():
                 if line.startswith('<') and line.endswith('>'):
                     sysname = line.strip('<> ').strip()
@@ -125,7 +83,7 @@ class RouterManager:
         except Exception as e:
             logging.error(f"[{tn.host}:{tn.port}] Telnet Error while getting sysname: {e}")
             return None
-    
+
     def parse_routing_table(self, routing_table_output: str) -> List[Dict[str, Any]]:
         """
         Parses the routing table output and returns a list of dictionaries
@@ -134,11 +92,9 @@ class RouterManager:
         filtered_entries = []
         lines = routing_table_output.splitlines()
         parsing = False
-        header_pattern = re.compile(r"Destination/Mask\s+Proto\s+Pre\s+Cost\s+Flags\s+NextHop\s+Interface")
         for line in lines:
-            if header_pattern.search(line):
+            if "Destination/Mask" in line and "Proto" in line:
                 parsing = True
-                logging.debug("Found routing table header. Starting to parse routing entries.")
                 continue
             if parsing:
                 if not line.strip() or line.startswith('=') or line.startswith('---'):
@@ -146,7 +102,7 @@ class RouterManager:
                 # Split the line into columns based on whitespace, allowing 'Interface' to contain spaces
                 parts = line.split(None, 6)
                 if len(parts) < 7:
-                    logging.debug(f"Skipping malformed routing line: {line}")
+                    logging.debug(f"Skipping malformed line: {line}")
                     continue
                 destination_mask = parts[0]
                 proto = parts[1]
@@ -170,7 +126,7 @@ class RouterManager:
                     filtered_entries.append(entry)
         logging.info(f"Parsed {len(filtered_entries)} filtered routing entries.")
         return filtered_entries
-    
+
     def parse_interface_brief(self, interface_brief_output: str) -> List[Dict[str, Any]]:
         """
         Parses the 'display ip interface brief' output and returns a list of dictionaries
@@ -179,25 +135,24 @@ class RouterManager:
         interfaces = []
         lines = interface_brief_output.splitlines()
         parsing = False
-        header_pattern = re.compile(r"Interface\s+IP Address/Mask\s+Physical\s+Protocol\s+VPN")
         for line in lines:
-            if header_pattern.search(line):
+            if "Interface" in line and "IP Address/Mask" in line:
                 parsing = True
-                logging.debug("Found interface brief header. Starting to parse interface entries.")
                 continue
             if parsing:
                 if not line.strip() or line.startswith('=') or line.startswith('---'):
                     continue
                 # Split the line into columns based on whitespace, allowing 'Interface' to contain spaces
-                parts = line.split(None, 4)
-                if len(parts) < 5:
-                    logging.debug(f"Skipping malformed interface line: {line}")
+                parts = line.split(None, 3)
+                if len(parts) < 4:
+                    logging.debug(f"Skipping malformed line: {line}")
                     continue
                 interface = parts[0]
                 ip_address_mask = parts[1]
                 # Skip entries where IP Address/Mask is 'unassigned'
                 if ip_address_mask.lower() == 'unassigned':
                     continue
+                # Optionally, you can capture other columns like 'Physical', 'Protocol', 'VPN' if needed
                 interface_entry = {
                     "Interface": interface,
                     "IP Address/Mask": ip_address_mask
@@ -205,51 +160,7 @@ class RouterManager:
                 interfaces.append(interface_entry)
         logging.info(f"Parsed {len(interfaces)} interface entries.")
         return interfaces
-    
-    def build_topology(self) -> List[Dict[str, Any]]:
-        """
-        Builds the network topology by identifying links between nodes based on shared subnets.
-        """
-        subnet_map = {}
-        for host_port, interfaces in self.telnet_interfaces.items():
-            for interface in interfaces:
-                ip_mask = interface["IP Address/Mask"]
-                try:
-                    ip_net = ipaddress.ip_network(ip_mask, strict=False)
-                    subnet = str(ip_net.network_address) + '/' + str(ip_net.prefixlen)
-                    if subnet not in subnet_map:
-                        subnet_map[subnet] = []
-                    subnet_map[subnet].append({
-                        "host_port": host_port,
-                        "interface": interface["Interface"],
-                        "sysname": self.telnet_sysnames.get(host_port, "Unknown")
-                    })
-                except ValueError as ve:
-                    logging.error(f"Invalid IP address/mask '{ip_mask}' on {host_port}: {ve}")
-    
-        links = []
-        for subnet, entries in subnet_map.items():
-            # Find links where exactly two interfaces are in the subnet from different nodes
-            if len(entries) == 2:
-                entry1, entry2 = entries
-                if entry1["host_port"] != entry2["host_port"]:
-                    link = {
-                        "node1": entry1["sysname"],
-                        "interface1": entry1["interface"],
-                        "node2": entry2["sysname"],
-                        "interface2": entry2["interface"],
-                        "subnet": subnet
-                    }
-                    links.append(link)
-                    logging.debug(f"Link found: {link}")
-            else:
-                if len(entries) > 2:
-                    logging.warning(f"Subnet {subnet} has more than two interfaces: {len(entries)} entries.")
-                elif len(entries) == 1:
-                    logging.warning(f"Subnet {subnet} has only one interface.")
-        logging.info(f"Built topology with {len(links)} links.")
-        return links
-    
+
     def get_configuration_via_telnet(self, tn: telnetlib.Telnet, image_type: str) -> Optional[str]:
         # Find matching device type based on partial image_type
         matched_key = next((key for key in self.commands_map if key in image_type), None)
@@ -258,36 +169,29 @@ class RouterManager:
             return None
 
         commands, quit_cmd = self.commands_map[matched_key]
-        for attempt in range(1, self.retry_attempts + 1):
-            try:
-                output = self.execute_telnet_commands(tn, commands, quit_cmd)
-                if output:
-                    sysname = self.get_sysname_via_telnet(tn)
-                    if sysname:
-                        key = f"{tn.host}:{tn.port}"
-                        with self.telnet_lock:
-                            self.telnet_sysnames[key] = sysname
-                            # Parse the routing table and store filtered entries
-                            filtered_routing = self.parse_routing_table(output)
-                            if filtered_routing:
-                                self.telnet_filtered_routing_tables[key] = filtered_routing
-                            else:
-                                logging.info(f"[{tn.host}:{tn.port}] No routing entries after filtering.")
-                            # Parse the interface brief and store interface info
-                            interfaces = self.parse_interface_brief(output)
-                            if interfaces:
-                                self.telnet_interfaces[key] = interfaces
-                            else:
-                                logging.info(f"[{tn.host}:{tn.port}] No interface entries after filtering.")
-                    return output
-                else:
-                    logging.warning(f"[{tn.host}:{tn.port}] No output received. Attempt {attempt} of {self.retry_attempts}. Retrying in {self.retry_delay} seconds...")
-            except Exception as e:
-                logging.error(f"[{tn.host}:{tn.port}] Error during Telnet command execution: {e}")
-            time.sleep(self.retry_delay)
-        logging.error(f"[{tn.host}:{tn.port}] Failed to retrieve configuration after {self.retry_attempts} attempts.")
-        return None
-    
+        output = self.execute_telnet_commands(tn, commands, quit_cmd)
+        if output:
+            sysname = self.get_sysname_via_telnet(tn)
+            if sysname:
+                key = f"{tn.host}:{tn.port}"
+                with self.telnet_lock:
+                    self.telnet_sysnames[key] = sysname
+                    # Parse the routing table and store filtered entries
+                    filtered_routing = self.parse_routing_table(output)
+                    if filtered_routing:
+                        self.telnet_filtered_routing_tables[key] = filtered_routing
+                    else:
+                        logging.info(f"[{tn.host}:{tn.port}] No routing entries after filtering.")
+                    # Parse the interface brief and store interface info
+                    interfaces = self.parse_interface_brief(output)
+                    if interfaces:
+                        self.telnet_interfaces[key] = interfaces
+                    else:
+                        logging.info(f"[{tn.host}:{tn.port}] No interface entries after filtering.")
+        else:
+            logging.warning(f"[{tn.host}:{tn.port}] No output received from Telnet commands.")
+        return output
+
     def connect_and_get_sysnames_and_configs(self):
         nodes = self.telnet_info.get("node", [])
         if not nodes:
@@ -304,32 +208,21 @@ class RouterManager:
                         logging.warning(f"Host IP or port missing for node with image_type '{image_type}'. Skipping.")
                         continue
                     try:
-                        tn = telnetlib.Telnet(host, port, timeout=20)  # Increased timeout for connection
+                        tn = telnetlib.Telnet(host, port, timeout=10)
                         tn.host, tn.port = host, port
                         future = executor.submit(self.get_configuration_via_telnet, tn, image_type)
                         future_to_node[future] = node
-                        logging.info(f"Initiated Telnet connection to {host}:{port}.")
                     except Exception as e:
                         logging.error(f"Failed to connect to {host}:{port} via Telnet: {e}")
-        
+
             for future in as_completed(future_to_node):
                 node = future_to_node[future]
                 host, port = node.get("hostip"), node.get("port")
                 config = future.result()
                 msg = "successful" if config else "failed"
                 logging.info(f"[{host}:{port}] Configuration retrieval {msg}.")
-                try:
-                    tn = telnetlib.Telnet(host, port)
-                    tn.close()
-                    logging.debug(f"Closed Telnet connection to {host}:{port}.")
-                except:
-                    pass  # Ignore errors on closing
-    
+
     def collect_results(self) -> Dict[str, Any]:
-        """
-        Collects the results and builds the network topology.
-        """
-        links = self.build_topology()
         return {
             "telnet_devices": {
                 host_port: {
@@ -338,8 +231,7 @@ class RouterManager:
                     "interfaces": self.telnet_interfaces.get(host_port, [])
                 }
                 for host_port in self.telnet_sysnames
-            },
-            "links": links
+            }
         }
 
 def find_latest_folder(base_path: str) -> str:
@@ -379,31 +271,7 @@ def write_output(output_path: str, data: Dict[str, Any]):
         logging.error(f"Error writing to output file: {e}")
         sys.exit(1)
 
-def write_lab_output(lab_id: int, data: Dict[str, Any]):
-    """
-    Writes the data to /opt/unetlab/labs_history/{labId}.json.
-    Creates the directory if it does not exist.
-    Overwrites the file if it already exists.
-    """
-    directory = "/opt/unetlab/labs_history"
-    try:
-        os.makedirs(directory, exist_ok=True)
-        logging.debug(f"Ensured directory exists: {directory}")
-    except Exception as e:
-        logging.error(f"Failed to create directory {directory}: {e}")
-        sys.exit(1)
-    
-    lab_output_path = os.path.join(directory, f"{lab_id}.json")
-    try:
-        with open(lab_output_path, 'w') as f:
-            json.dump(data, f, indent=4)
-        logging.info(f"Lab output written to {lab_output_path}")
-    except IOError as e:
-        logging.error(f"Error writing to lab output file: {e}")
-        sys.exit(1)
-
-def main(input_path: str, output_path: str, log_level: str):
-    setup_logging(log_level)
+def main(input_path: str, output_path: str):
     base_path = "/uploadPath/reasoning"
     if "{t}" in input_path or "{t}" in output_path:
         latest_folder = find_latest_folder(base_path)
@@ -418,20 +286,12 @@ def main(input_path: str, output_path: str, log_level: str):
     mapping = router_manager.collect_results()
 
     logging.info("Collected filtered routing configurations with sysnames and interfaces:")
-    logging.debug(json.dumps(mapping, indent=4))
+    logging.info(json.dumps(mapping, indent=4))
     write_output(output_path, mapping)
-
-    # Extract labId from telnet_info
-    lab_id = telnet_info.get("labId")
-    if lab_id is not None:
-        write_lab_output(lab_id, mapping)
-    else:
-        logging.warning("labId not found in param.json. Skipping writing to labs_history.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process and filter router configurations from param.json.")
     parser.add_argument("-i", "--input", required=True, help="Path to param.json, use {t} for latest folder number.")
     parser.add_argument("-o", "--output", required=True, help="Output path for filtered routing information with sysnames and interfaces, use {t} for latest folder number.")
-    parser.add_argument("--log-level", default="INFO", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the logging level (default: INFO).")
     args = parser.parse_args()
-    main(args.input, args.output, args.log_level)
+    main(args.input, args.output)
